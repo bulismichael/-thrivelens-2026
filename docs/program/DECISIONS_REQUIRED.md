@@ -26,9 +26,10 @@ No entry is approved unless a named human records approval in `HUMAN_APPROVALS.m
 
 R0 can continue through contracts and installation-free tests. The following may require the user when reached:
 
-1. Accept Android SDK licence terms after exact packages and projected size are shown.
-2. Close memory-heavy applications before Flutter/Android installation or builds; current free RAM has repeatedly fallen below 1 GB.
-3. Provide a physical Android device with USB debugging, or enable supported virtualization and approve emulator installation, for device-only evidence.
-4. Approve any privileged firewall, driver, BIOS/firmware, or system-package change if it becomes necessary. R0 defaults avoid these changes.
+1. Authorize creation of a project-only Ubuntu WSL2 distro under the counted ThriveLens root after its exact image, signed package pins, projected size, and rollback are shown. The existing shared Ubuntu distro remains untouched.
+2. Close memory-heavy applications until at least 2 GiB is free before any distro, package, Flutter/Android installation, database, or build action.
+3. Accept Android SDK licence terms after exact packages and projected size are shown.
+4. Provide a physical Android device with USB debugging, or enable supported virtualization and approve emulator installation, for device-only evidence.
+5. Approve any privileged firewall, driver, BIOS/firmware, or system-package change if it becomes necessary. R0 defaults avoid these changes.
 
 No paid key, deployment, public repository, or production credential is required for R0.

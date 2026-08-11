@@ -45,7 +45,7 @@
       "release": "R0",
       "title": "Bootstrap the backend and real PostgreSQL foundation",
       "objective": "Pin a reversible Python and real PostgreSQL development foundation without coupling backend progress to Android licence acceptance.",
-      "status": "READY",
+      "status": "BLOCKED",
       "owner_agent": "platform_observability_engineer",
       "dependencies": ["TL-R0-001"],
       "owned_paths": ["config/toolchains/backend.json", "scripts/bootstrap/backend/**", "scripts/dev/postgres/**", "infra/compose.yaml", "README.md", ".env.example", "docs/program/task-notes/r0/platform.md"],
@@ -55,9 +55,9 @@
       "acceptance_criteria": ["Exact versions, provenance, licences, checksums or documented signature limits, compressed/extracted sizes, and rollback are recorded", "Portable real PostgreSQL starts on loopback and stops without a system service, or the explicit WSL fallback is activated", "Configuration phase makes the external attributable root required before any backend or Flutter installation", "The resource policy runs before and after installation; footprint remains below the high-water stop and low-memory preflight fails closed"],
       "required_tests": ["pwsh -NoProfile -File scripts/check_resource_budget.ps1", "pwsh -NoProfile -File scripts/dev/postgres/preflight.ps1", "pwsh -NoProfile -File scripts/dev/postgres/test_runtime.ps1", "pwsh -NoProfile -File scripts/check_resource_budget.ps1"],
       "required_reviewers": ["quality_engineer", "security_privacy_reviewer", "integration_release_lead"],
-      "evidence": {"commits": [], "test_reports": [], "reviews": [], "screenshots": [], "notes": []},
-      "blockers": [],
-      "next_action": "Verify immutable official artifacts and projected sizes before any download"
+      "evidence": {"commits": [], "test_reports": [], "reviews": [], "screenshots": [], "notes": ["The installation-free platform scaffold is integrated at ed057936c26e3235dbb73e1918afbf00eab95aee; this is not canonical verification or runtime evidence", "Product architecture accepted the blocked-scaffold direction; exact terminal quality and security re-review passed while preserving every real-runtime gate"]},
+      "blockers": ["The EDB Windows archive is rejected and the Windows PostgreSQL and Python installers are hard-disabled", "A dedicated project-only WSL distro under the counted root requires explicit human system authority plus signed exact package pins", "Observed free RAM remains below the 2 GiB install and 1 GiB runtime floors", "No PostgreSQL binary or cluster exists; the WSL implementation, data inventory, storage accounting, and real start-stop proof remain incomplete"],
+      "next_action": "After human WSL authority and at least 2 GiB free RAM, inspect the exact distro/package state, provision only a dedicated counted distro, implement the WSL lifecycle, update the data inventory, and pass the real runtime gates"
     },
     {
       "id": "TL-R0-004",
