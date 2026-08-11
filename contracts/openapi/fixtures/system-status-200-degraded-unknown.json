@@ -1,0 +1,8 @@
+{
+  "status": "degraded",
+  "components": {
+    "app_service": "available",
+    "database": "unknown"
+  },
+  "checked_at": "2026-08-12T00:00:00Z"
+}
