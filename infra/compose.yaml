@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
+    restart: "no"
+    environment:
+      POSTGRES_USER: ${TL_POSTGRES_ADMIN_USER:?Set TL_POSTGRES_ADMIN_USER}
+      POSTGRES_DB: ${TL_POSTGRES_DATABASE:?Set TL_POSTGRES_DATABASE}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256 --data-checksums
+    secrets:
+      - postgres_admin_password
+    ports:
+      - "127.0.0.1:${TL_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - thrivelens_postgres_r0:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    mem_limit: 512m
+    shm_size: 64mb
+    stop_grace_period: 30s
+
+secrets:
+  postgres_admin_password:
+    file: ${TL_POSTGRES_ADMIN_PASSWORD_FILE:?Set TL_POSTGRES_ADMIN_PASSWORD_FILE}
+
+volumes:
+  thrivelens_postgres_r0:

@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "task_id": "TL-R0-003",
+  "status": "BLOCKED_RUNTIME_NOT_PROVISIONED",
+  "target": {
+    "os": "windows",
+    "architecture": "x86_64",
+    "attributable_root": "%LOCALAPPDATA%\\ThriveLens"
+  },
+  "resource_policy": {
+    "allowed_active_phases": ["bootstrap_active", "implementation", "release"],
+    "install_minimum_free_memory_bytes": 2147483648,
+    "runtime_minimum_free_memory_bytes": 1073741824,
+    "aggregate_cap_bytes": 19327352832,
+    "hard_stop_percent": 85
+  },
+  "python": {
+    "implementation": "CPython",
+    "version": "3.13.15",
+    "distribution": "Windows installer (64-bit)",
+    "artifact_filename": "python-3.13.15-amd64.exe",
+    "artifact_url": "https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.exe",
+    "release_page": "https://www.python.org/downloads/release/python-31315/",
+    "publisher": "Python Software Foundation",
+    "license": "Python Software Foundation License Version 2",
+    "license_url": "https://docs.python.org/3/license.html",
+    "compressed_bytes": 29452944,
+    "maximum_installed_bytes": 268435456,
+    "installed_size_status": "PROJECTION_CEILING_NOT_MEASURED",
+    "install_root": "%LOCALAPPDATA%\\ThriveLens\\toolchains\\python\\3.13.15",
+    "integrity": {
+      "algorithm": "SHA-256",
+      "value": "edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403",
+      "source": "Python 3.13.15 release page",
+      "sigstore_bundle_url": "https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.exe.sigstore",
+      "sigstore_signer_identity": "thomas@python.org",
+      "sigstore_oidc_issuer": "https://accounts.google.com",
+      "authenticode_subject_contains": "Python Software Foundation",
+      "status": "PUBLISHER_ATTESTATION_AVAILABLE_NOT_LOCALLY_VERIFIED"
+    },
+    "install_policy": {
+      "all_users": false,
+      "modify_machine_path": false,
+      "include_launcher": false,
+      "include_test_suite": false,
+      "include_pip": true
+    },
+    "rollback": "Run the same verified installer with /uninstall /quiet, confirm the dedicated install root is absent, and rerun the aggregate resource gate."
+  },
+  "postgresql": {
+    "version": "17.10",
+    "package_revision": "2",
+    "distribution": "EDB Windows x86-64 binaries ZIP linked from postgresql.org",
+    "artifact_filename": "postgresql-17.10-2-windows-x64-binaries.zip",
+    "artifact_url": "https://get.enterprisedb.com/postgresql/postgresql-17.10-2-windows-x64-binaries.zip",
+    "official_windows_page": "https://www.postgresql.org/download/windows/",
+    "publisher_download_page": "https://www.enterprisedb.com/download-postgresql-binaries?lang=en",
+    "release_notes": "https://www.postgresql.org/docs/release/17.10/",
+    "publisher": "EnterpriseDB-hosted PostgreSQL binaries",
+    "license": "PostgreSQL License",
+    "license_url": "https://www.postgresql.org/about/licence/",
+    "bundled_component_licenses_status": "PENDING_ARCHIVE_INSPECTION_NO_LICENSE_ACCEPTED",
+    "compressed_bytes": 333927270,
+    "maximum_extracted_binary_bytes": 805306368,
+    "maximum_initial_cluster_bytes": 134217728,
+    "maximum_synthetic_backup_bytes": 67108864,
+    "maximum_total_postgresql_bytes": 1006632960,
+    "extracted_size_status": "PROJECTION_CEILING_NOT_MEASURED",
+    "binary_root": "%LOCALAPPDATA%\\ThriveLens\\toolchains\\postgresql\\17.10-2\\pgsql",
+    "data_root": "%LOCALAPPDATA%\\ThriveLens\\data\\postgresql\\r0",
+    "log_root": "%LOCALAPPDATA%\\ThriveLens\\logs\\postgresql\\r0",
+    "port": 55432,
+    "listen_address": "127.0.0.1",
+    "integrity": {
+      "algorithm": "SHA-256",
+      "value": null,
+      "publisher_checksum_url": null,
+      "publisher_signature_url": null,
+      "http_last_modified": "Thu, 11 Jun 2026 12:28:18 GMT",
+      "http_etag": "\"79b5e842ce14c51627d6b8e3baa703a0-40\"",
+      "limitation": "The EDB binaries page exposes the archive over HTTPS but publishes no archive SHA-256 or detached signature. Content-Length, Last-Modified, and the multipart ETag are metadata, not a cryptographic publisher attestation.",
+      "required_executable_authenticode_subject_regex": "(?i)(EnterpriseDB|EDB)",
+      "status": "BLOCKED_PUBLISHER_ARCHIVE_ATTESTATION_UNAVAILABLE"
+    },
+    "portable_status": "CANDIDATE_NOT_ACCEPTED_OR_INSTALLED",
+    "rollback": "Stop only the dedicated cluster, confirm no process uses its data directory, then remove only the versioned binary/data/log directories after explicit authorization and rerun the aggregate resource gate."
+  },
+  "wsl_fallback": {
+    "trigger": "Activate only if the portable archive integrity limitation is not accepted by independent security review, executable signatures fail, extracted size exceeds its ceiling, or loopback start/stop cannot be proven.",
+    "status": "NOT_ACTIVATED_REQUIRES_RESOURCE_ACCOUNTING_AND_HUMAN_SYSTEM_CHANGE",
+    "constraints": [
+      "Do not invoke sudo or change the WSL distribution automatically.",
+      "Add and validate attributable WSL storage accounting before package installation or cluster creation.",
+      "Run the same loopback, SCRAM, start/stop, memory, and aggregate footprint gates."
+    ]
+  },
+  "compose": {
+    "purpose": "Secondary PostgreSQL-only contract for compatible CI or developer hosts; Docker Desktop is not an R0 dependency.",
+    "image": "postgres:17.10-bookworm",
+    "index_digest": "sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f",
+    "linux_amd64_manifest_digest": "sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923",
+    "linux_amd64_compressed_layer_bytes": 156095657,
+    "maximum_runtime_bytes": 536870912,
+    "packaging_source": "https://github.com/docker-library/postgres",
+    "packaging_license": "MIT for Docker packaging; contained distribution components retain their own licences",
+    "contained_license_inventory_status": "PENDING_IMAGE_INSPECTION_NOT_PULLED",
+    "digest_status": "REGISTRY_METADATA_PINNED_NOT_PULLED"
+  },
+  "provenance_observed_at": "2026-08-12",
+  "provisioning_status": "NO_ARTIFACT_DOWNLOADED_NO_LICENSE_ACCEPTED_NO_SERVICE_STARTED_NO_CREDENTIAL_CREATED"
+}
