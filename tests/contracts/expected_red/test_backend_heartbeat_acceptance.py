@@ -29,15 +29,22 @@ SENSITIVE_CANARY = "TL_SENSITIVE_CANARY_7F3A"
 OPENAPI_DOCUMENT = load_json(OPENAPI_PATH)
 
 
+@dataclass
+class _CaptureState:
+    count: int = 0
+    overflowed: bool = False
+
+
 class _BoundedTextCapture(io.StringIO):
-    def __init__(self, shared_count: list[int], limit: int = 65536) -> None:
+    def __init__(self, state: _CaptureState, limit: int = 65536) -> None:
         super().__init__()
-        self.shared_count = shared_count
+        self.state = state
         self.limit = limit
 
     def write(self, value: str) -> int:
-        self.shared_count[0] += len(value.encode("utf-8", errors="replace"))
-        if self.shared_count[0] > self.limit:
+        self.state.count += len(value.encode("utf-8", errors="replace"))
+        if self.state.count > self.limit:
+            self.state.overflowed = True
             raise AssertionError("ASGI request emitted output above the privacy capture limit")
         return super().write(value)
 
@@ -137,9 +144,9 @@ def _request(
     query_string: bytes = b"",
     body: bytes = b"",
 ) -> tuple[int, dict[str, str], bytes]:
-    shared_count = [0]
-    stdout = _BoundedTextCapture(shared_count)
-    stderr = _BoundedTextCapture(shared_count)
+    capture_state = _CaptureState()
+    stdout = _BoundedTextCapture(capture_state)
+    stderr = _BoundedTextCapture(capture_state)
     logger_call_count = 0
     bounded_logger_values: list[str] = []
 
@@ -169,6 +176,8 @@ def _request(
             _asgi_request_async(app, method, path, headers, query_string, body)
         )
 
+    if capture_state.overflowed:
+        raise AssertionError("ASGI request emitted output above the privacy capture limit")
     captured_text = stdout.getvalue() + stderr.getvalue() + "\n".join(bounded_logger_values)
     sensitive_values = [
         SENSITIVE_CANARY,

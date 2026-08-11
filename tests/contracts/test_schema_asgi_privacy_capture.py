@@ -18,6 +18,11 @@ def _fixture_app(mode: str):  # type: ignore[no-untyped-def]
             print(SENSITIVE_CANARY)
         elif mode == "stdout_overcap":
             print("X" * 70000)
+        elif mode == "stdout_overcap_swallowed":
+            try:
+                print("X" * 70000)
+            except AssertionError:
+                pass
         elif mode == "stderr":
             print(SENSITIVE_CANARY, file=sys.stderr)
         elif mode == "logger":
@@ -58,6 +63,7 @@ class AsgiPrivacyCaptureTests(unittest.TestCase):
         for mode in (
             "stdout",
             "stdout_overcap",
+            "stdout_overcap_swallowed",
             "stderr",
             "logger",
             "logger_handle",
