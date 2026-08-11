@@ -21,6 +21,7 @@ SOURCE_ROOT = REPOSITORY_ROOT / "services" / "api" / "src"
 IMPLEMENTATION_FILE = SOURCE_ROOT / "thrivelens_api" / "main.py"
 STATIC_ROOT = REPOSITORY_ROOT / "tests" / "contracts" / "fixtures" / "static"
 SERVER_CORRELATION_ID = "server-generated-id"
+SENSITIVE_CANARY = "TL_SENSITIVE_CANARY_7F3A"
 OPENAPI_DOCUMENT = load_json(OPENAPI_PATH)
 
 
@@ -69,6 +70,8 @@ async def _asgi_request_async(
     method: str,
     path: str,
     headers: dict[str, str] | None = None,
+    query_string: bytes = b"",
+    body: bytes = b"",
 ) -> tuple[int, dict[str, str], bytes]:
     request_headers = {"host": "127.0.0.1:8000"}
     request_headers.update(headers or {})
@@ -79,7 +82,7 @@ async def _asgi_request_async(
         nonlocal request_sent
         if not request_sent:
             request_sent = True
-            return {"type": "http.request", "body": b"", "more_body": False}
+            return {"type": "http.request", "body": body, "more_body": False}
         return {"type": "http.disconnect"}
 
     async def send(message: dict[str, Any]) -> None:
@@ -93,7 +96,7 @@ async def _asgi_request_async(
         "scheme": "http",
         "path": path,
         "raw_path": path.encode("ascii"),
-        "query_string": b"",
+        "query_string": query_string,
         "root_path": "",
         "headers": [(key.lower().encode("ascii"), value.encode("utf-8")) for key, value in request_headers.items()],
         "client": ("127.0.0.1", 41000),
@@ -110,9 +113,14 @@ async def _asgi_request_async(
 
 
 def _request(
-    app: Any, method: str, path: str, headers: dict[str, str] | None = None
+    app: Any,
+    method: str,
+    path: str,
+    headers: dict[str, str] | None = None,
+    query_string: bytes = b"",
+    body: bytes = b"",
 ) -> tuple[int, dict[str, str], bytes]:
-    return asyncio.run(_asgi_request_async(app, method, path, headers))
+    return asyncio.run(_asgi_request_async(app, method, path, headers, query_string, body))
 
 
 def _json(body: bytes) -> dict[str, Any]:
@@ -123,6 +131,38 @@ def _json(body: bytes) -> dict[str, Any]:
 
 
 class BackendHeartbeatAcceptanceTests(unittest.TestCase):
+    def assert_one_safe_log_event(
+        self,
+        captured_events: list[dict[str, str]],
+        expected_outcome: str,
+    ) -> None:
+        self.assertEqual(
+            captured_events,
+            [
+                {
+                    "event": "r0_heartbeat_request",
+                    "outcome": expected_outcome,
+                    "correlation_id": SERVER_CORRELATION_ID,
+                }
+            ],
+        )
+        serialized = json.dumps(captured_events, sort_keys=True).lower()
+        self.assertNotIn(SENSITIVE_CANARY.lower(), serialized)
+        for forbidden_field in (
+            "authorization",
+            "x-private-value",
+            "bearer",
+            "headers",
+            "query",
+            "body",
+            "route",
+            "path",
+            "exception",
+            "host",
+            "origin",
+        ):
+            self.assertNotIn(forbidden_field, serialized)
+
     def assert_contract_json(
         self,
         status: int,
@@ -316,7 +356,7 @@ class BackendHeartbeatAcceptanceTests(unittest.TestCase):
                 )
                 self.assertEqual(headers.get("x-correlation-id"), SERVER_CORRELATION_ID)
                 self.assertEqual(payload["error"]["correlation_id"], SERVER_CORRELATION_ID)
-        sentinel = "postgresql://secret@host/db C:\\Users\\person\\service.py SELECT * traceback"
+        sentinel = SENSITIVE_CANARY
         status, headers, body = _request(
             _app(factory, _Probe(failure=RuntimeError(sentinel))),
             "GET",
@@ -329,53 +369,106 @@ class BackendHeartbeatAcceptanceTests(unittest.TestCase):
             500,
             "#/components/schemas/InternalErrorResponse",
         )
-        lowered = body.decode("utf-8").lower()
-        for forbidden in ("postgresql", "secret", "c:\\users", "select", "traceback"):
-            self.assertNotIn(forbidden, lowered)
-        captured_events: list[dict[str, str]] = []
-        logged_status, logged_headers, logged_body = _request(
-            _app(
-                factory,
-                _Probe(failure=RuntimeError(sentinel)),
-                log_sink=captured_events.append,
+        self.assertNotIn(SENSITIVE_CANARY.encode("ascii"), body)
+
+        cases = (
+            (
+                "success",
+                _Probe(),
+                "GET",
+                "/api/v1/health/live",
+                {},
+                200,
+                "#/components/schemas/LivenessResponse",
+                "success",
             ),
-            "GET",
-            "/api/v1/system/status",
-            {
-                "authorization": "Bearer SENTINEL_AUTH_TOKEN",
-                "x-private-value": sentinel,
-            },
+            (
+                "degraded",
+                _Probe(result="not_ready"),
+                "GET",
+                "/api/v1/system/status",
+                {},
+                200,
+                "#/components/schemas/SystemStatusResponse",
+                "degraded",
+            ),
+            (
+                "unexpected error",
+                _Probe(failure=RuntimeError(SENSITIVE_CANARY)),
+                "GET",
+                "/api/v1/system/status",
+                {},
+                500,
+                "#/components/schemas/InternalErrorResponse",
+                "error",
+            ),
+            (
+                "rejected host",
+                _Probe(),
+                "GET",
+                "/api/v1/health/live",
+                {"host": f"{SENSITIVE_CANARY}.invalid"},
+                400,
+                "#/components/schemas/RequestRejectedResponse",
+                "rejected",
+            ),
+            (
+                "rejected origin",
+                _Probe(),
+                "GET",
+                "/api/v1/health/live",
+                {"origin": f"https://{SENSITIVE_CANARY}.invalid"},
+                403,
+                "#/components/schemas/RequestRejectedResponse",
+                "rejected",
+            ),
+            (
+                "rejected request route",
+                _Probe(),
+                "GET",
+                f"/api/v1/{SENSITIVE_CANARY}",
+                {},
+                404,
+                "#/components/schemas/RequestRejectedResponse",
+                "rejected",
+            ),
         )
-        self.assert_contract_json(
-            logged_status,
-            logged_headers,
-            logged_body,
-            500,
-            "#/components/schemas/InternalErrorResponse",
-        )
-        self.assertEqual(
-            captured_events,
-            [
-                {
-                    "event": "r0_heartbeat_request",
-                    "outcome": "error",
-                    "correlation_id": SERVER_CORRELATION_ID,
+        sensitive_query = f"private={SENSITIVE_CANARY}".encode("ascii")
+        sensitive_body = f'{{"private":"{SENSITIVE_CANARY}"}}'.encode("ascii")
+        for (
+            label,
+            probe,
+            method,
+            path,
+            case_headers,
+            expected_status,
+            schema_ref,
+            outcome,
+        ) in cases:
+            with self.subTest(log_case=label):
+                captured_events: list[dict[str, str]] = []
+                sensitive_headers = {
+                    "authorization": f"Bearer {SENSITIVE_CANARY}",
+                    "x-private-value": SENSITIVE_CANARY,
                 }
-            ],
-        )
-        serialized_events = json.dumps(captured_events, sort_keys=True).lower()
-        for forbidden in (
-            "postgresql",
-            "secret",
-            "c:\\users",
-            "select",
-            "traceback",
-            "authorization",
-            "bearer",
-            "/api/v1/system/status",
-        ):
-            self.assertNotIn(forbidden, serialized_events)
-        self.assertNotIn(b"SENTINEL", logged_body)
+                sensitive_headers.update(case_headers)
+                logged_status, logged_headers, logged_body = _request(
+                    _app(factory, probe, log_sink=captured_events.append),
+                    method,
+                    path,
+                    sensitive_headers,
+                    sensitive_query,
+                    sensitive_body,
+                )
+                self.assert_contract_json(
+                    logged_status,
+                    logged_headers,
+                    logged_body,
+                    expected_status,
+                    schema_ref,
+                )
+                self.assertNotIn(SENSITIVE_CANARY.encode("ascii"), logged_body)
+                self.assert_one_safe_log_event(captured_events, outcome)
 
     def test_same_origin_host_method_and_static_boundary(self) -> None:
         marker = "THRIVELENS_MISSING_IMPLEMENTATION::TL-R0-005-SAME-ORIGIN-HOST-STATIC"

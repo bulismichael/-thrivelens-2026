@@ -77,13 +77,43 @@ class ResponseFixtureTests(unittest.TestCase):
 
     def test_error_messages_and_codes_are_exact_allowlists(self) -> None:
         fixture = self.fixture("internal-error-500.json")
-        fixture["error"]["message"] = "C:\\Users\\person\\secret.py: SELECT *"
+        fixture["error"]["message"] = "TL_SENSITIVE_CANARY_7F3A"
         errors = validate_instance(
             self.document,
             {"$ref": "#/components/schemas/InternalErrorResponse"},
             fixture,
         )
         self.assertTrue(errors)
+
+    def test_timestamp_requires_a_real_bounded_utc_calendar_date_time(self) -> None:
+        fixture = self.fixture("system-status-200-available.json")
+        for invalid in (
+            "2026-02-29T00:00:00Z",
+            "2024-02-30T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-01-01T24:00:00Z",
+            "2026-01-01T00:60:00Z",
+            "2026-01-01T00:00:60Z",
+        ):
+            with self.subTest(invalid=invalid):
+                candidate = copy.deepcopy(fixture)
+                candidate["checked_at"] = invalid
+                errors = validate_instance(
+                    self.document,
+                    {"$ref": "#/components/schemas/SystemStatusResponse"},
+                    candidate,
+                )
+                self.assertTrue(errors)
+
+        fixture["checked_at"] = "2024-02-29T23:59:59Z"
+        self.assertEqual(
+            validate_instance(
+                self.document,
+                {"$ref": "#/components/schemas/SystemStatusResponse"},
+                fixture,
+            ),
+            [],
+        )
 
 
 if __name__ == "__main__":

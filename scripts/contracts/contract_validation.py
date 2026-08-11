@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -584,6 +585,14 @@ def validate_instance(
             errors.append(f"{pointer}: string is longer than maxLength")
         if "pattern" in schema and re.fullmatch(schema["pattern"], value) is None:
             errors.append(f"{pointer}: string does not match pattern")
+        if schema.get("format") == "date-time":
+            try:
+                parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                errors.append(f"{pointer}: string is not a real UTC calendar date-time")
+            else:
+                if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+                    errors.append(f"{pointer}: string is not the exact bounded UTC date-time form")
 
     if schema_type == "object" and isinstance(value, dict):
         properties = schema.get("properties", {})
