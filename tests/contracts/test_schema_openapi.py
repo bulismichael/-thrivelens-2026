@@ -115,6 +115,60 @@ class OpenApiContractTests(unittest.TestCase):
             lambda doc: doc["components"]["schemas"]["CorrelationId"].update({"nullable": True})
         )
 
+    def test_semantic_shadow_keys_at_root_components_and_operation_are_rejected(self) -> None:
+        self.assert_rejected(lambda doc: doc.update({"x-production-enabled": True}))
+        self.assert_rejected(
+            lambda doc: doc["components"].update(
+                {"securitySchemes": {"shadow": {"type": "http", "scheme": "bearer"}}}
+            )
+        )
+        self.assert_rejected(
+            lambda doc: doc["paths"]["/health/live"]["get"].update({"x-cors-enabled": True})
+        )
+
+    def test_unknown_info_server_response_and_schema_keys_are_rejected(self) -> None:
+        self.assert_rejected(lambda doc: doc["info"].update({"license": {"name": "shadow"}}))
+        self.assert_rejected(lambda doc: doc["servers"][0].update({"variables": {}}))
+        self.assert_rejected(
+            lambda doc: doc["paths"]["/health/live"]["get"]["responses"]["200"].update(
+                {"links": {}}
+            )
+        )
+        self.assert_rejected(
+            lambda doc: doc["components"]["schemas"]["CorrelationId"].update(
+                {"example": "shadow-id"}
+            )
+        )
+
+    def test_unknown_header_parameter_content_and_media_type_keys_are_rejected(self) -> None:
+        self.assert_rejected(
+            lambda doc: doc["paths"]["/health/live"]["get"]["responses"]["200"]["headers"][
+                "Cache-Control"
+            ].update({"example": "no-store"})
+        )
+        self.assert_rejected(
+            lambda doc: doc["components"]["parameters"]["CorrelationIdRequest"].update(
+                {"allowEmptyValue": True}
+            )
+        )
+        self.assert_rejected(
+            lambda doc: doc["paths"]["/health/live"]["get"]["responses"]["200"]["content"].update(
+                {"text/plain": {"schema": {"type": "string"}}}
+            )
+        )
+        self.assert_rejected(
+            lambda doc: doc["paths"]["/health/live"]["get"]["responses"]["200"]["content"][
+                "application/json"
+            ].update({"example": {"status": "alive"}})
+        )
+
+    def test_allowed_key_with_noncanonical_value_is_rejected_by_fingerprint(self) -> None:
+        self.assert_rejected(
+            lambda doc: doc["paths"]["/health/live"]["get"].update(
+                {"summary": "A bounded but noncanonical shadow summary"}
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
