@@ -19,7 +19,7 @@
       "required_reviewers": ["product_systems_architect", "quality_engineer", "security_privacy_reviewer"],
       "evidence": {"commits": ["794794f10f53b0c8caaaac6c84fa3fc549d8ee70"], "test_reports": ["docs/program/evidence/test-reports/TL-R0-001/794794f10f53b0c8caaaac6c84fa3fc549d8ee70/report.json"], "reviews": ["docs/program/evidence/reviews/TL-R0-001/794794f10f53b0c8caaaac6c84fa3fc549d8ee70/product.json", "docs/program/evidence/reviews/TL-R0-001/794794f10f53b0c8caaaac6c84fa3fc549d8ee70/quality.json", "docs/program/evidence/reviews/TL-R0-001/794794f10f53b0c8caaaac6c84fa3fc549d8ee70/security.json"], "screenshots": [], "notes": ["Eight Wave 0 reports received", "Independent product, quality, and security review iterated until no unresolved high finding remained", "All 76 validator regressions pass under normal and optimized Python on the canonical implementation commit", "The strict resource-policy suite passes at 0.002 GB against the 18 GB cap"]},
       "blockers": [],
-      "next_action": "Begin dependency-feasible TL-R0-002 contract work and TL-R0-003 platform bootstrap work"
+      "next_action": "Finish TL-R0-002 verification, then keep TL-R0-003 blocked until the human-authorized counted WSL continuation passes real runtime gates"
     },
     {
       "id": "TL-R0-002",
@@ -56,8 +56,8 @@
       "required_tests": ["pwsh -NoProfile -File scripts/check_resource_budget.ps1", "pwsh -NoProfile -File scripts/dev/postgres/preflight.ps1", "pwsh -NoProfile -File scripts/dev/postgres/test_runtime.ps1", "pwsh -NoProfile -File scripts/check_resource_budget.ps1"],
       "required_reviewers": ["quality_engineer", "security_privacy_reviewer", "integration_release_lead"],
       "evidence": {"commits": [], "test_reports": [], "reviews": [], "screenshots": [], "notes": ["The installation-free platform scaffold is integrated at ed057936c26e3235dbb73e1918afbf00eab95aee; this is not canonical verification or runtime evidence", "Product architecture accepted the blocked-scaffold direction; exact terminal quality and security re-review passed while preserving every real-runtime gate"]},
-      "blockers": ["The EDB Windows archive is rejected and the Windows PostgreSQL and Python installers are hard-disabled", "A dedicated project-only WSL distro under the counted root requires explicit human system authority plus signed exact package pins", "Observed free RAM remains below the 2 GiB install and 1 GiB runtime floors", "No PostgreSQL binary or cluster exists; the WSL implementation, data inventory, storage accounting, and real start-stop proof remain incomplete"],
-      "next_action": "After human WSL authority and at least 2 GiB free RAM, inspect the exact distro/package state, provision only a dedicated counted distro, implement the WSL lifecycle, update the data inventory, and pass the real runtime gates"
+      "blockers": ["The EDB Windows archive is rejected and the Windows PostgreSQL and Python installers are hard-disabled", "A dedicated project-only WSL distro under the counted root requires explicit human system authority plus signed exact package pins", "Observed free RAM remains below the 2 GiB install and 1 GiB runtime floors", "The resource phase remains prebootstrap and must change exactly to bootstrap_active before any authorized mutation", "No PostgreSQL binary or cluster exists; the WSL implementation, data inventory, storage accounting, and real start-stop proof remain incomplete"],
+      "next_action": "After human WSL authority and at least 2 GiB free RAM, activate the integration-owned resource phase before mutation, inspect the exact distro/package state, provision only a dedicated counted distro, implement the WSL lifecycle, update the data inventory, and pass the real runtime gates"
     },
     {
       "id": "TL-R0-004",
@@ -132,7 +132,7 @@
       "required_tests": ["pwsh -NoProfile -File scripts/check_resource_budget.ps1", "pwsh -NoProfile -File scripts/mobile/run_quality.ps1", "pwsh -NoProfile -File scripts/mobile/verify_web_surface.ps1", "pwsh -NoProfile -File scripts/check_resource_budget.ps1"],
       "required_reviewers": ["quality_engineer", "ux_design_director", "security_privacy_reviewer", "integration_release_lead"],
       "evidence": {"commits": [], "test_reports": [], "reviews": [], "screenshots": [], "notes": []},
-      "blockers": ["TL-R0-001 and TL-R0-003 not VERIFIED", "Flutter artifact provenance and size not yet verified"],
+      "blockers": ["TL-R0-003 not VERIFIED", "Flutter artifact provenance and size not yet verified"],
       "next_action": "Pin Flutter then start red state widget semantics and golden tests"
     },
     {
@@ -170,7 +170,7 @@
       "required_tests": ["pwsh -NoProfile -File scripts/quality/self_test.ps1", "pwsh -NoProfile -File scripts/quality/assert_clean_worktree.ps1"],
       "required_reviewers": ["security_privacy_reviewer", "integration_release_lead"],
       "evidence": {"commits": [], "test_reports": [], "reviews": [], "screenshots": [], "notes": []},
-      "blockers": ["TL-R0-001, TL-R0-002, and TL-R0-003 not VERIFIED"],
+      "blockers": ["TL-R0-002 and TL-R0-003 not VERIFIED"],
       "next_action": "Build the harness as soon as the early contract and backend platform gates are stable"
     },
     {

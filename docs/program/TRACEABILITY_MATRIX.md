@@ -9,7 +9,7 @@
 | Mobile can render reachable/degraded API | Wave 0 product/backend/UX | TL-R0-002, TL-R0-005, TL-R0-008 | Status contract and real degraded e2e test | Specified |
 | Generated clients are transport truth | Prompt section 12 | TL-R0-002, TL-R0-006, TL-R0-008 | Deterministic regeneration/no-drift test | Not started |
 | Structured errors and safe correlation | Prompt R0; threat R0-T02/R0-T11 | TL-R0-002, TL-R0-005 | Contract, sentinel redaction, malformed-header tests | Specified |
-| Production rejects demo/unsafe defaults | Prompt mandatory tests; threat R0-T01 | TL-R0-003, TL-R0-005, TL-R0-009 | Runtime-config and release-transport tests | Platform installers and direct Compose activation fail closed; API not implemented |
+| Production rejects demo/unsafe defaults | Prompt mandatory tests; threat R0-T01 | TL-R0-003, TL-R0-005, TL-R0-009 | Runtime-config and release-transport tests | Platform installers fail closed and Compose has no runnable service surface; API not implemented |
 | R0 persists no user data or probe history | Product boundary; data inventory | TL-R0-004, TL-R0-005 | Read-only/repeated-probe integration tests | Specified |
 | Initial premium accessible Flutter system | Prompt section 9; frontend skill; Wave 0 UX | TL-R0-007, TL-R0-008 | Widget, golden, semantics, text-scale, reduced-motion evidence | Specified, not brand-approved |
 | Tier 1 under 10 minutes; Tier 2 under 30 | Prompt sections 13 and 19 | TL-R0-009, TL-R0-010 | Timed reports | Not measured |

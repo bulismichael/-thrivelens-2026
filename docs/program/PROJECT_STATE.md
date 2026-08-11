@@ -12,7 +12,7 @@ Risks changed: Low free host memory remains high risk; local work and every inst
 Tests run: Both control validators and 76 control-plane regressions previously passed in normal and optimized Python. On the integrated platform bytes, the manifest passed 79 assertions, static policy passed 138 assertions across 13 scripts, security controls passed 31 assertions, and the resource gate is OK at 0.003 GB. Preflight and runtime probes exit 2 with the exact absent-runtime and authority blockers.
 Latest stable checkpoint: `ed057936c26e3235dbb73e1918afbf00eab95aee` (`fix: make R0 Compose contract inert`) is the independently reviewed safe-scaffold integration. The latest verified product task remains TL-R0-001 at its direct metadata checkpoint `672a98895896d792722eacf2457792eae8ef79fa`.
 Next dependency-safe tasks: Finish and verify `TL-R0-002`. `TL-R0-004`, `TL-R0-007`, and `TL-R0-009` remain blocked until a real TL-R0-003 WSL runtime is implemented and VERIFIED.
-Next exact orchestrator action: Commit the truthful TL-R0-003 blocked-state handoff, finish the closed heartbeat contract, then request human WSL authority and at least 2 GiB free RAM before any distro, package, SDK, database, or build mutation.
+Next exact orchestrator action: Finish and verify the closed heartbeat contract, then request human WSL authority and at least 2 GiB free RAM before activating `bootstrap_active` or performing any distro, package, SDK, database, or build mutation.
 
 ## Environment baseline
 
