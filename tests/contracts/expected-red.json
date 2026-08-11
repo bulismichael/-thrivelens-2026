@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "id": "TL-R0-005-LIVENESS-DB-INDEPENDENCE",
+      "owner": "TL-R0-005",
+      "working_directory": ".",
+      "argv": ["python", "tests/contracts/expected_red/test_backend_heartbeat_acceptance.py", "BackendHeartbeatAcceptanceTests.test_liveness_never_invokes_database_probe"],
+      "timeout_seconds": 30,
+      "test_ids": ["__main__.BackendHeartbeatAcceptanceTests.test_liveness_never_invokes_database_probe"],
+      "expected_missing_behavior_marker": "THRIVELENS_MISSING_IMPLEMENTATION::TL-R0-005-LIVENESS-DB-INDEPENDENCE",
+      "future_green_command": "pwsh -NoProfile -File scripts/contracts/assert_expected_green.ps1 -Manifest tests/contracts/expected-red.json -Owner TL-R0-005"
+    },
+    {
+      "id": "TL-R0-005-READINESS-STATUS-MATRIX",
+      "owner": "TL-R0-005",
+      "working_directory": ".",
+      "argv": ["python", "tests/contracts/expected_red/test_backend_heartbeat_acceptance.py", "BackendHeartbeatAcceptanceTests.test_readiness_and_mobile_status_truth_matrix"],
+      "timeout_seconds": 30,
+      "test_ids": ["__main__.BackendHeartbeatAcceptanceTests.test_readiness_and_mobile_status_truth_matrix"],
+      "expected_missing_behavior_marker": "THRIVELENS_MISSING_IMPLEMENTATION::TL-R0-005-READINESS-STATUS-MATRIX",
+      "future_green_command": "pwsh -NoProfile -File scripts/contracts/assert_expected_green.ps1 -Manifest tests/contracts/expected-red.json -Owner TL-R0-005"
+    },
+    {
+      "id": "TL-R0-005-HEADERS-CORRELATION-REDACTION",
+      "owner": "TL-R0-005",
+      "working_directory": ".",
+      "argv": ["python", "tests/contracts/expected_red/test_backend_heartbeat_acceptance.py", "BackendHeartbeatAcceptanceTests.test_headers_correlation_and_error_redaction"],
+      "timeout_seconds": 30,
+      "test_ids": ["__main__.BackendHeartbeatAcceptanceTests.test_headers_correlation_and_error_redaction"],
+      "expected_missing_behavior_marker": "THRIVELENS_MISSING_IMPLEMENTATION::TL-R0-005-HEADERS-CORRELATION-REDACTION",
+      "future_green_command": "pwsh -NoProfile -File scripts/contracts/assert_expected_green.ps1 -Manifest tests/contracts/expected-red.json -Owner TL-R0-005"
+    },
+    {
+      "id": "TL-R0-005-SAME-ORIGIN-HOST-STATIC",
+      "owner": "TL-R0-005",
+      "working_directory": ".",
+      "argv": ["python", "tests/contracts/expected_red/test_backend_heartbeat_acceptance.py", "BackendHeartbeatAcceptanceTests.test_same_origin_host_method_and_static_boundary"],
+      "timeout_seconds": 30,
+      "test_ids": ["__main__.BackendHeartbeatAcceptanceTests.test_same_origin_host_method_and_static_boundary"],
+      "expected_missing_behavior_marker": "THRIVELENS_MISSING_IMPLEMENTATION::TL-R0-005-SAME-ORIGIN-HOST-STATIC",
+      "future_green_command": "pwsh -NoProfile -File scripts/contracts/assert_expected_green.ps1 -Manifest tests/contracts/expected-red.json -Owner TL-R0-005"
+    },
+    {
+      "id": "TL-R0-005-PRODUCTION-REJECTION",
+      "owner": "TL-R0-005",
+      "working_directory": ".",
+      "argv": ["python", "tests/contracts/expected_red/test_backend_heartbeat_acceptance.py", "BackendHeartbeatAcceptanceTests.test_production_startup_is_unconditionally_rejected"],
+      "timeout_seconds": 30,
+      "test_ids": ["__main__.BackendHeartbeatAcceptanceTests.test_production_startup_is_unconditionally_rejected"],
+      "expected_missing_behavior_marker": "THRIVELENS_MISSING_IMPLEMENTATION::TL-R0-005-PRODUCTION-REJECTION",
+      "future_green_command": "pwsh -NoProfile -File scripts/contracts/assert_expected_green.ps1 -Manifest tests/contracts/expected-red.json -Owner TL-R0-005"
+    },
+    {
+      "id": "TL-R0-008-ADB-REVERSE-LIFECYCLE",
+      "owner": "TL-R0-008",
+      "working_directory": ".",
+      "argv": ["python", "tests/contracts/expected_red/test_android_heartbeat_acceptance.py", "AndroidHeartbeatAcceptanceTests.test_selected_device_reverse_and_failure_cleanup"],
+      "timeout_seconds": 30,
+      "test_ids": ["__main__.AndroidHeartbeatAcceptanceTests.test_selected_device_reverse_and_failure_cleanup"],
+      "expected_missing_behavior_marker": "THRIVELENS_MISSING_IMPLEMENTATION::TL-R0-008-ADB-REVERSE-LIFECYCLE",
+      "future_green_command": "pwsh -NoProfile -File scripts/contracts/assert_expected_green.ps1 -Manifest tests/contracts/expected-red.json -Owner TL-R0-008"
+    },
+    {
+      "id": "TL-R0-008-DEBUG-MANIFEST-BOUNDARY",
+      "owner": "TL-R0-008",
+      "working_directory": ".",
+      "argv": ["python", "tests/contracts/expected_red/test_android_heartbeat_acceptance.py", "AndroidHeartbeatAcceptanceTests.test_debug_cleartext_is_loopback_scoped"],
+      "timeout_seconds": 30,
+      "test_ids": ["__main__.AndroidHeartbeatAcceptanceTests.test_debug_cleartext_is_loopback_scoped"],
+      "expected_missing_behavior_marker": "THRIVELENS_MISSING_IMPLEMENTATION::TL-R0-008-DEBUG-MANIFEST-BOUNDARY",
+      "future_green_command": "pwsh -NoProfile -File scripts/contracts/assert_expected_green.ps1 -Manifest tests/contracts/expected-red.json -Owner TL-R0-008"
+    },
+    {
+      "id": "TL-R0-008-RELEASE-PRODUCTION-NEGATIVE",
+      "owner": "TL-R0-008",
+      "working_directory": ".",
+      "argv": ["python", "tests/contracts/expected_red/test_android_heartbeat_acceptance.py", "AndroidHeartbeatAcceptanceTests.test_release_rejects_debug_transport_and_production"],
+      "timeout_seconds": 30,
+      "test_ids": ["__main__.AndroidHeartbeatAcceptanceTests.test_release_rejects_debug_transport_and_production"],
+      "expected_missing_behavior_marker": "THRIVELENS_MISSING_IMPLEMENTATION::TL-R0-008-RELEASE-PRODUCTION-NEGATIVE",
+      "future_green_command": "pwsh -NoProfile -File scripts/contracts/assert_expected_green.ps1 -Manifest tests/contracts/expected-red.json -Owner TL-R0-008"
+    }
+  ]
+}
