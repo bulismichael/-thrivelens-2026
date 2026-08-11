@@ -6,6 +6,8 @@ $script:MaximumCombinedOutputBytes = 65536
 $script:OutputReadChunkBytes = 4096
 $script:PostKillDrainMilliseconds = 500
 $script:PostExitDrainMilliseconds = 1000
+$script:ContainmentWaitMilliseconds = 750
+$script:SensitiveCanary = 'TL_SENSITIVE_CANARY_7F3A'
 $script:EntryKeys = @(
     'argv',
     'expected_missing_behavior_marker',
@@ -16,6 +18,215 @@ $script:EntryKeys = @(
     'timeout_seconds',
     'working_directory'
 )
+
+if (-not ('ThriveLens.Contracts.KillOnCloseJob' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+namespace ThriveLens.Contracts
+{
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct JobBasicLimitInformation
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct IoCounters
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct JobExtendedLimitInformation
+    {
+        public JobBasicLimitInformation BasicLimitInformation;
+        public IoCounters IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct JobBasicAccountingInformation
+    {
+        public long TotalUserTime;
+        public long TotalKernelTime;
+        public long ThisPeriodTotalUserTime;
+        public long ThisPeriodTotalKernelTime;
+        public uint TotalPageFaultCount;
+        public uint TotalProcesses;
+        public uint ActiveProcesses;
+        public uint TotalTerminatedProcesses;
+    }
+
+    public sealed class KillOnCloseJob : IDisposable
+    {
+        private const int JobObjectBasicAccountingInformation = 1;
+        private const int JobObjectExtendedLimitInformation = 9;
+        private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+        private IntPtr handle;
+
+        public KillOnCloseJob()
+        {
+            handle = CreateJobObject(IntPtr.Zero, null);
+            if (handle == IntPtr.Zero)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not create process containment");
+
+            JobExtendedLimitInformation information = new JobExtendedLimitInformation();
+            information.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+            int length = Marshal.SizeOf<JobExtendedLimitInformation>();
+            IntPtr buffer = Marshal.AllocHGlobal(length);
+            try
+            {
+                Marshal.StructureToPtr(information, buffer, false);
+                if (!SetInformationJobObject(handle, JobObjectExtendedLimitInformation, buffer, (uint)length))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not configure process containment");
+            }
+            catch
+            {
+                Close();
+                throw;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        public void Assign(Process process)
+        {
+            if (handle == IntPtr.Zero)
+                throw new ObjectDisposedException(nameof(KillOnCloseJob));
+            if (!AssignProcessToJobObject(handle, process.Handle))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not assign process containment");
+        }
+
+        private uint ActiveProcesses()
+        {
+            JobBasicAccountingInformation information = new JobBasicAccountingInformation();
+            int length = Marshal.SizeOf<JobBasicAccountingInformation>();
+            IntPtr buffer = Marshal.AllocHGlobal(length);
+            try
+            {
+                Marshal.StructureToPtr(information, buffer, false);
+                if (!QueryInformationJobObject(
+                    handle,
+                    JobObjectBasicAccountingInformation,
+                    buffer,
+                    (uint)length,
+                    IntPtr.Zero))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not query process containment");
+                return Marshal.PtrToStructure<JobBasicAccountingInformation>(buffer).ActiveProcesses;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        public bool TerminateAndClose(int timeoutMilliseconds)
+        {
+            bool empty = false;
+            try
+            {
+                if (handle == IntPtr.Zero)
+                    return false;
+                TerminateJobObject(handle, 0xE0000001);
+                Stopwatch stopwatch = Stopwatch.StartNew();
+                do
+                {
+                    try
+                    {
+                        if (ActiveProcesses() == 0)
+                        {
+                            empty = true;
+                            break;
+                        }
+                    }
+                    catch
+                    {
+                        empty = false;
+                        break;
+                    }
+                    Thread.Sleep(5);
+                }
+                while (stopwatch.ElapsedMilliseconds < timeoutMilliseconds);
+            }
+            finally
+            {
+                Close();
+            }
+            return empty;
+        }
+
+        public void Close()
+        {
+            IntPtr current = handle;
+            handle = IntPtr.Zero;
+            if (current != IntPtr.Zero)
+                CloseHandle(current);
+        }
+
+        public void Dispose()
+        {
+            Close();
+            GC.SuppressFinalize(this);
+        }
+
+        ~KillOnCloseJob()
+        {
+            Close();
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateJobObject(IntPtr securityAttributes, string name);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetInformationJobObject(
+            IntPtr job,
+            int informationClass,
+            IntPtr information,
+            uint informationLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool QueryInformationJobObject(
+            IntPtr job,
+            int informationClass,
+            IntPtr information,
+            uint informationLength,
+            IntPtr returnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+    }
+}
+'@
+}
 
 function Test-ExactKeys {
     param(
@@ -152,51 +363,120 @@ function Add-BoundedOutputChunk {
 function Invoke-BoundedProcess {
     param(
         [Parameter(Mandatory)] [System.Collections.IDictionary] $Entry,
-        [scriptblock] $TerminationHook
+        [scriptblock] $TerminationHook,
+        [scriptblock] $ContainmentResultHook,
+        [scriptblock] $AssignmentHook
     )
 
     $argv = @($Entry.argv)
+    $supervisorPath = Join-Path $PSScriptRoot 'bounded_process_supervisor.py'
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     $info.FileName = [string]$argv[0]
-    for ($index = 1; $index -lt $argv.Count; $index++) {
+    [void]$info.ArgumentList.Add($supervisorPath)
+    [void]$info.ArgumentList.Add('--')
+    for ($index = 0; $index -lt $argv.Count; $index++) {
         [void]$info.ArgumentList.Add([string]$argv[$index])
     }
     $info.WorkingDirectory = $script:RepositoryRoot
     $info.UseShellExecute = $false
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
+    $info.RedirectStandardInput = $true
     $info.CreateNoWindow = $true
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $info
+    $job = $null
     try {
-        if (-not $process.Start()) {
-            $process.Dispose()
-            return [pscustomobject]@{
-                Started = $false; TimedOut = $false; OutputLimitExceeded = $false
-                KillFailed = $false; DrainIncomplete = $false; ReadFailed = $false
-                ExitCode = $null; Output = ''
-            }
-        }
+        $job = [ThriveLens.Contracts.KillOnCloseJob]::new()
     }
     catch {
         $process.Dispose()
         return [pscustomobject]@{
             Started = $false; TimedOut = $false; OutputLimitExceeded = $false
             KillFailed = $false; DrainIncomplete = $false; ReadFailed = $false
+            ContainmentFailed = $true; UnsafeTermination = $false
+            ExitCode = $null; Output = ''
+        }
+    }
+    try {
+        if (-not $process.Start()) {
+            $job.Dispose()
+            $process.Dispose()
+            return [pscustomobject]@{
+                Started = $false; TimedOut = $false; OutputLimitExceeded = $false
+                KillFailed = $false; DrainIncomplete = $false; ReadFailed = $false
+                ContainmentFailed = $false; UnsafeTermination = $false
+                ExitCode = $null; Output = ''
+            }
+        }
+    }
+    catch {
+        $job.Dispose()
+        $process.Dispose()
+        return [pscustomobject]@{
+            Started = $false; TimedOut = $false; OutputLimitExceeded = $false
+            KillFailed = $false; DrainIncomplete = $false; ReadFailed = $false
+            ContainmentFailed = $false; UnsafeTermination = $false
             ExitCode = $null; Output = ''
         }
     }
 
-    $stdoutStream = $process.StandardOutput.BaseStream
-    $stderrStream = $process.StandardError.BaseStream
+    try {
+        if ($null -ne $AssignmentHook) {
+            & $AssignmentHook $job $process
+        }
+        else {
+            $job.Assign($process)
+        }
+    }
+    catch {
+        $fallbackKillFailed = $false
+        try { $process.StandardInput.Close() } catch { }
+        try {
+            if (-not $process.WaitForExit(500)) { $fallbackKillFailed = $true }
+        }
+        catch { $fallbackKillFailed = $true }
+        if ($fallbackKillFailed) {
+            try { $process.Kill($true); [void]$process.WaitForExit(500) } catch { }
+        }
+        $job.Dispose()
+        $process.Dispose()
+        return [pscustomobject]@{
+            Started = $true; TimedOut = $false; OutputLimitExceeded = $false
+            KillFailed = $fallbackKillFailed; DrainIncomplete = $false; ReadFailed = $false
+            ContainmentFailed = $true; UnsafeTermination = $fallbackKillFailed
+            ExitCode = $null; Output = ''
+        }
+    }
+
+    try {
+        $process.StandardInput.BaseStream.WriteByte([byte][char]'G')
+        $process.StandardInput.BaseStream.Flush()
+        $process.StandardInput.Close()
+    }
+    catch {
+        $treeGoneAfterReleaseFailure = $false
+        try { $treeGoneAfterReleaseFailure = $job.TerminateAndClose($script:ContainmentWaitMilliseconds) } catch { try { $job.Dispose() } catch { } }
+        $process.Dispose()
+        return [pscustomobject]@{
+            Started = $true; TimedOut = $false; OutputLimitExceeded = $false
+            KillFailed = $false; DrainIncomplete = $false; ReadFailed = $true
+            ContainmentFailed = -not $treeGoneAfterReleaseFailure
+            UnsafeTermination = -not $treeGoneAfterReleaseFailure
+            ExitCode = $null; Output = ''
+        }
+    }
+
     $stdoutBytes = [System.IO.MemoryStream]::new()
     $stderrBytes = [System.IO.MemoryStream]::new()
     $stdoutBuffer = [byte[]]::new($script:OutputReadChunkBytes)
     $stderrBuffer = [byte[]]::new($script:OutputReadChunkBytes)
-    $stdoutTask = $stdoutStream.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
-    $stderrTask = $stderrStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
-    $stdoutEof = $false
-    $stderrEof = $false
+    $stdoutStream = $null
+    $stderrStream = $null
+    $stdoutTask = $null
+    $stderrTask = $null
+    $stdoutEof = $true
+    $stderrEof = $true
     $combinedCount = 0
     $timedOut = $false
     $outputLimitExceeded = $false
@@ -207,7 +487,21 @@ function Invoke-BoundedProcess {
     $postExitStartedAt = -1L
     $processExited = $false
 
-    while ($true) {
+    try {
+        $stdoutStream = $process.StandardOutput.BaseStream
+        $stderrStream = $process.StandardError.BaseStream
+        $stdoutEof = $false
+        $stderrEof = $false
+        $stdoutTask = $stdoutStream.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+        $stderrTask = $stderrStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
+    }
+    catch {
+        $readFailed = $true
+        if ($null -eq $stdoutTask) { $stdoutEof = $true }
+        if ($null -eq $stderrTask) { $stderrEof = $true }
+    }
+
+    while (-not $readFailed) {
         $madeProgress = $false
         if (-not $stdoutEof -and $null -ne $stdoutTask -and $stdoutTask.IsCompleted) {
             try { $read = $stdoutTask.GetAwaiter().GetResult() } catch { $read = 0; $readFailed = $true }
@@ -267,8 +561,8 @@ function Invoke-BoundedProcess {
         }
     }
 
-    $terminationRequired = $timedOut -or $outputLimitExceeded -or ($readFailed -and -not $processExited)
-    if ($terminationRequired) {
+    $terminationRequired = $timedOut -or $outputLimitExceeded -or $readFailed -or $drainIncomplete
+    if ($terminationRequired -and -not $processExited) {
         try {
             if ($null -ne $TerminationHook) {
                 & $TerminationHook $process
@@ -280,15 +574,27 @@ function Invoke-BoundedProcess {
         catch {
             $killFailed = $true
         }
+    }
+
+    $treeGone = $false
+    try {
+        $treeGone = $job.TerminateAndClose($script:ContainmentWaitMilliseconds)
+    }
+    catch {
+        try { $job.Dispose() } catch { }
+        $treeGone = $false
+    }
+    $job = $null
+    if ($null -ne $ContainmentResultHook) {
         try {
-            if (-not $process.WaitForExit(500)) {
-                $killFailed = $true
-            }
+            $treeGone = $treeGone -and [bool](& $ContainmentResultHook $treeGone)
         }
         catch {
-            $killFailed = $true
+            $treeGone = $false
         }
+    }
 
+    if ($terminationRequired -or -not $treeGone) {
         $drainDeadline = $stopwatch.ElapsedMilliseconds + $script:PostKillDrainMilliseconds
         while (($stopwatch.ElapsedMilliseconds -lt $drainDeadline) -and (-not $stdoutEof -or -not $stderrEof)) {
             $madeProgress = $false
@@ -332,8 +638,8 @@ function Invoke-BoundedProcess {
     $stderr = [System.Text.Encoding]::UTF8.GetString($stderrBytes.ToArray())
     $combined = ($stdout + "`n" + $stderr).Replace($script:RepositoryRoot, '<repository>')
 
-    try { $stdoutStream.Dispose() } catch { }
-    try { $stderrStream.Dispose() } catch { }
+    if ($null -ne $stdoutStream) { try { $stdoutStream.Dispose() } catch { } }
+    if ($null -ne $stderrStream) { try { $stderrStream.Dispose() } catch { } }
     $stdoutBytes.Dispose()
     $stderrBytes.Dispose()
     $process.Dispose()
@@ -345,6 +651,8 @@ function Invoke-BoundedProcess {
         KillFailed = $killFailed
         DrainIncomplete = $drainIncomplete
         ReadFailed = $readFailed
+        ContainmentFailed = -not $treeGone
+        UnsafeTermination = -not $treeGone
         ExitCode = $exitCode
         Output = $combined
     }
@@ -382,14 +690,22 @@ function Invoke-ExpectedRedEntries {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [System.Collections.IDictionary[]] $Entries,
-        [scriptblock] $TerminationHook
+        [scriptblock] $TerminationHook,
+        [scriptblock] $ContainmentResultHook,
+        [scriptblock] $AssignmentHook
     )
 
     $count = 0
     $failures = [System.Collections.Generic.List[string]]::new()
     foreach ($entry in $Entries) {
         try {
-            $result = Invoke-BoundedProcess -Entry $entry -TerminationHook $TerminationHook
+            $result = Invoke-BoundedProcess -Entry $entry -TerminationHook $TerminationHook -ContainmentResultHook $ContainmentResultHook -AssignmentHook $AssignmentHook
+            if ($result.UnsafeTermination) {
+                throw "THRIVELENS_UNSAFE_TERMINATION::$($entry.id)"
+            }
+            if ($result.ContainmentFailed) {
+                throw "Expected-red entry could not establish process containment: $($entry.id)."
+            }
             if (-not $result.Started) {
                 throw "Expected-red entry executable could not start: $($entry.id)."
             }
@@ -428,6 +744,9 @@ function Invoke-ExpectedRedEntries {
             $count++
         }
         catch {
+            if ($_.Exception.Message.StartsWith('THRIVELENS_UNSAFE_TERMINATION::', [System.StringComparison]::Ordinal)) {
+                throw
+            }
             $failures.Add([string]$entry.id) | Out-Null
         }
     }
@@ -442,7 +761,9 @@ function Invoke-ExpectedGreenEntries {
     param(
         [Parameter(Mandatory)] [System.Collections.IDictionary[]] $Entries,
         [Parameter(Mandatory)] [string] $Owner,
-        [scriptblock] $TerminationHook
+        [scriptblock] $TerminationHook,
+        [scriptblock] $ContainmentResultHook,
+        [scriptblock] $AssignmentHook
     )
 
     if ($Owner -notmatch '^TL-R0-[0-9]{3}$') {
@@ -456,7 +777,13 @@ function Invoke-ExpectedGreenEntries {
     $failures = [System.Collections.Generic.List[string]]::new()
     foreach ($entry in $selected) {
         try {
-            $result = Invoke-BoundedProcess -Entry $entry -TerminationHook $TerminationHook
+            $result = Invoke-BoundedProcess -Entry $entry -TerminationHook $TerminationHook -ContainmentResultHook $ContainmentResultHook -AssignmentHook $AssignmentHook
+            if ($result.UnsafeTermination) {
+                throw "THRIVELENS_UNSAFE_TERMINATION::$($entry.id)"
+            }
+            if ($result.ContainmentFailed) {
+                throw "Expected-green entry could not establish process containment: $($entry.id)."
+            }
             if (-not $result.Started) {
                 throw "Expected-green entry executable could not start: $($entry.id)."
             }
@@ -477,6 +804,9 @@ function Invoke-ExpectedGreenEntries {
             }
             Assert-CollectedOnce -Entry $entry -Output $result.Output
             Assert-NoToolOrCrashFailure -Entry $entry -Output $result.Output
+            if ($result.Output.IndexOf($script:SensitiveCanary, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw "Expected-green entry emitted the contract privacy canary: $($entry.id)."
+            }
             if ($result.ExitCode -ne 0) {
                 throw "Expected-green entry did not pass: $($entry.id)."
             }
@@ -489,6 +819,9 @@ function Invoke-ExpectedGreenEntries {
             $count++
         }
         catch {
+            if ($_.Exception.Message.StartsWith('THRIVELENS_UNSAFE_TERMINATION::', [System.StringComparison]::Ordinal)) {
+                throw
+            }
             $failures.Add([string]$entry.id) | Out-Null
         }
     }

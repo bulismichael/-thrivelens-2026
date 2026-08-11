@@ -4,6 +4,7 @@ import json
 import os
 import re
 import stat
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,11 @@ MAX_PACKAGED_ENTRIES = 8192
 MAX_PACKAGED_FILE_BYTES = 16 * 1024 * 1024
 MAX_PACKAGED_AGGREGATE_BYTES = 128 * 1024 * 1024
 PACKAGED_SCAN_CHUNK_BYTES = 8192
+MAX_APK_BYTES = 256 * 1024 * 1024
+MAX_APK_ENTRIES = 8192
+MAX_APK_ENTRY_BYTES = 16 * 1024 * 1024
+MAX_APK_EXPANDED_BYTES = 128 * 1024 * 1024
+RELEASE_POLICY_APK_ENTRY = "assets/flutter_assets/assets/r0_release_policy.json"
 ACCEPTED_HOST_HEADERS = frozenset(
     {"127.0.0.1", "127.0.0.1:8000", "localhost", "localhost:8000"}
 )
@@ -195,3 +201,100 @@ def scan_packaged_inputs(sources: list[Path]) -> dict[str, int]:
         "files": file_count,
         "bytes": aggregate_bytes,
     }
+
+
+def inspect_release_apk_bytes(apk: Path) -> dict[str, int]:
+    """Inspect every expanded APK file entry with strict count and byte bounds."""
+
+    try:
+        metadata = apk.lstat()
+    except OSError as exc:
+        raise TransportPolicyError("Release APK is absent or unreadable") from exc
+    if _is_reparse_stat(metadata) or not stat.S_ISREG(metadata.st_mode):
+        raise TransportPolicyError("Release APK must be one regular non-reparse file")
+    if metadata.st_size < 1 or metadata.st_size > MAX_APK_BYTES:
+        raise TransportPolicyError("Release APK exceeds its bounded archive size")
+
+    forbidden = b"http://127.0.0.1:8000/api/v1"
+    expanded = 0
+    file_count = 0
+    saw_manifest = False
+    try:
+        with zipfile.ZipFile(apk, "r") as archive:
+            entries = archive.infolist()
+            if not entries or len(entries) > MAX_APK_ENTRIES:
+                raise TransportPolicyError("Release APK entry inventory is invalid")
+            if len({entry.filename for entry in entries}) != len(entries):
+                raise TransportPolicyError("Release APK contains duplicate entry names")
+            for entry in entries:
+                name = entry.filename.replace("\\", "/")
+                parts = name.split("/")
+                unsafe_name = (
+                    not name
+                    or name.startswith("/")
+                    or any(part in {"", ".", ".."} for part in parts)
+                )
+                if unsafe_name and not entry.is_dir():
+                    raise TransportPolicyError("Release APK contains an unsafe entry name")
+                mode = (entry.external_attr >> 16) & 0xFFFF
+                if stat.S_ISLNK(mode):
+                    raise TransportPolicyError("Release APK contains a symbolic-link entry")
+                if entry.is_dir():
+                    continue
+                if entry.file_size < 0 or entry.file_size > MAX_APK_ENTRY_BYTES:
+                    raise TransportPolicyError("Release APK entry exceeds its byte limit")
+                expanded += entry.file_size
+                if expanded > MAX_APK_EXPANDED_BYTES:
+                    raise TransportPolicyError("Release APK exceeds its expanded byte limit")
+                file_count += 1
+                lowered_name = name.lower()
+                if lowered_name == "androidmanifest.xml":
+                    saw_manifest = True
+                if "network_security" in lowered_name or "network-security" in lowered_name:
+                    raise TransportPolicyError("Release APK packages a network-security resource")
+                tail = b""
+                with archive.open(entry, "r") as handle:
+                    actual_size = 0
+                    while True:
+                        chunk = handle.read(PACKAGED_SCAN_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        actual_size += len(chunk)
+                        if actual_size > MAX_APK_ENTRY_BYTES:
+                            raise TransportPolicyError("Release APK entry exceeds its byte limit")
+                        window = (tail + chunk).lower()
+                        if forbidden in window:
+                            raise TransportPolicyError("Release APK contains the forbidden debug API base")
+                        tail = window[-(len(forbidden) - 1) :]
+                    if actual_size != entry.file_size:
+                        raise TransportPolicyError("Release APK entry size changed during inspection")
+    except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+        raise TransportPolicyError("Release APK archive could not be inspected") from exc
+    if not saw_manifest:
+        raise TransportPolicyError("Release APK does not contain AndroidManifest.xml")
+    return {"entries": len(entries), "files": file_count, "expanded_bytes": expanded}
+
+
+def load_release_policy_from_apk(apk: Path) -> dict[str, Any]:
+    expected = {
+        "schema_version": 1,
+        "resolved_api_base_url": "",
+        "production_enabled": False,
+    }
+    try:
+        with zipfile.ZipFile(apk, "r") as archive:
+            entry = archive.getinfo(RELEASE_POLICY_APK_ENTRY)
+            if entry.file_size < 2 or entry.file_size > 4096:
+                raise TransportPolicyError("Packaged release policy exceeds its byte limit")
+            raw = archive.read(entry)
+    except KeyError as exc:
+        raise TransportPolicyError("Release APK is missing its resolved policy") from exc
+    except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+        raise TransportPolicyError("Release APK policy could not be inspected") from exc
+    try:
+        policy = json.loads(raw.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TransportPolicyError("Packaged release policy is invalid JSON") from exc
+    if policy != expected:
+        raise TransportPolicyError("Packaged release policy differs from the closed safe values")
+    return policy

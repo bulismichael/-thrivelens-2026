@@ -38,6 +38,36 @@ function Assert-Fails {
     $script:groups++
 }
 
+function Assert-ProcessGone {
+    param(
+        [Parameter(Mandatory)] [string] $PidPath,
+        [Parameter(Mandatory)] [string] $Label
+    )
+    if (-not (Test-Path -LiteralPath $PidPath)) {
+        throw "Harness self-test fixture did not publish a child PID for $Label."
+    }
+    $processId = [int](Get-Content -LiteralPath $PidPath -Raw)
+    $deadline = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($deadline.ElapsedMilliseconds -lt 1000) {
+        $child = $null
+        try {
+            $child = [System.Diagnostics.Process]::GetProcessById($processId)
+            if ($child.HasExited) {
+                $child.Dispose()
+                return
+            }
+        }
+        catch {
+            return
+        }
+        finally {
+            if ($null -ne $child) { $child.Dispose() }
+        }
+        [System.Threading.Thread]::Sleep(10)
+    }
+    throw "Harness containment left a live child for $Label."
+}
+
 function New-FixtureEntry {
     param(
         [Parameter(Mandatory)] [string] $Id,
@@ -64,6 +94,8 @@ function New-FixtureEntry {
 try {
     $script:runnerPath = Join-Path $temporaryRoot 'fixture runner.py'
     $runnerSource = @'
+import os
+import subprocess
 import sys
 import time
 import unittest
@@ -72,11 +104,25 @@ mode = sys.argv[1]
 class_name = sys.argv[2]
 marker = sys.argv[3]
 
+def spawn_pipe_holder(pid_path):
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(8)"],
+    )
+    with open(pid_path, "w", encoding="ascii") as handle:
+        handle.write(str(child.pid))
+    return child
+
+if mode in ("kill_failure", "child_holds_pipe"):
+    spawn_pipe_holder(sys.argv[4])
+
 if mode != "no_collection":
     def test_case(self):
         if mode == "red":
             self.fail(marker)
         if mode == "green":
+            return
+        if mode == "canary_output":
+            print("TL_SENSITIVE_CANARY_7F3A")
             return
         if mode == "wrong":
             self.fail("WRONG_ASSERTION")
@@ -95,9 +141,9 @@ if mode != "no_collection":
             time.sleep(3)
             self.fail(marker)
         if mode == "kill_failure":
-            with open(sys.argv[4], "w", encoding="ascii") as handle:
-                handle.write(str(__import__("os").getpid()))
-            time.sleep(10)
+            time.sleep(8)
+            return
+        if mode == "child_holds_pipe":
             return
         if mode == "import_error":
             __import__("thrivelens_fixture_module_that_does_not_exist")
@@ -127,6 +173,18 @@ unittest.main(argv=[sys.argv[0]], verbosity=2)
     $green = New-FixtureEntry -Id 'TL-R0-900-GREEN' -Owner 'TL-R0-900' -Mode 'green' -ClassName 'GreenCase'
     Assert-Passes { Invoke-ExpectedGreenEntries -Entries @($green) -Owner 'TL-R0-900' } 'one collected green test'
     Assert-Fails { Invoke-ExpectedRedEntries -Entries @($green) } 'unexpected red pass'
+
+    $canaryOutput = New-FixtureEntry -Id 'TL-R0-900-CANARY-OUTPUT' -Owner 'TL-R0-900' -Mode 'canary_output' -ClassName 'CanaryOutputCase'
+    Assert-Fails { Invoke-ExpectedGreenEntries -Entries @($canaryOutput) -Owner 'TL-R0-900' } 'contract canary in green process output'
+
+    $unreleasedPath = Join-Path $temporaryRoot 'assignment-failure-target-ran.txt'
+    $unreleased = New-FixtureEntry -Id 'TL-R0-900-ASSIGNMENT-FAILURE' -Owner 'TL-R0-900' -Mode 'touch' -ClassName 'AssignmentFailureCase' -ExtraArguments @($unreleasedPath)
+    Assert-Fails {
+        Invoke-ExpectedGreenEntries -Entries @($unreleased) -Owner 'TL-R0-900' -AssignmentHook { throw 'simulated assignment failure' }
+    } 'assignment failure never releases target argv'
+    if (Test-Path -LiteralPath $unreleasedPath) {
+        throw 'Supervisor released target argv after containment assignment failed.'
+    }
 
     $wrong = New-FixtureEntry -Id 'TL-R0-900-WRONG-RED' -Owner 'TL-R0-900' -Mode 'wrong' -ClassName 'WrongCase'
     Assert-Fails { Invoke-ExpectedRedEntries -Entries @($wrong) } 'wrong assertion failure'
@@ -175,44 +233,32 @@ unittest.main(argv=[sys.argv[0]], verbosity=2)
     $killFailure = New-FixtureEntry -Id 'TL-R0-900-KILL-FAILURE' -Owner 'TL-R0-900' -Mode 'kill_failure' -ClassName 'KillFailureCase' -Timeout 1 -ExtraArguments @($killFailurePidPath)
     $killFailureHook = { throw 'simulated process-tree termination failure before termination' }
     $killFailureStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $killFailureChild = $null
-    try {
-        Assert-Fails {
-            Invoke-ExpectedRedEntries -Entries @($killFailure) -TerminationHook $killFailureHook
-        } 'termination failure fails closed without awaiting pending output reads'
-        $killFailureStopwatch.Stop()
-        if ($killFailureStopwatch.ElapsedMilliseconds -ge 5000) {
-            throw 'Termination-failure rejection exceeded the bounded deadline.'
-        }
-        if (-not (Test-Path -LiteralPath $killFailurePidPath)) {
-            throw 'Termination-failure fixture did not publish its child process ID.'
-        }
-        $killFailurePid = [int](Get-Content -LiteralPath $killFailurePidPath -Raw)
-        $killFailureChild = [System.Diagnostics.Process]::GetProcessById($killFailurePid)
-        if ($killFailureChild.HasExited) {
-            throw 'Termination-failure fixture exited before explicit self-test cleanup.'
-        }
+    Assert-Fails {
+        Invoke-ExpectedRedEntries -Entries @($killFailure) -TerminationHook $killFailureHook
+    } 'primary kill failure is contained without awaiting pending output reads'
+    $killFailureStopwatch.Stop()
+    if ($killFailureStopwatch.ElapsedMilliseconds -ge 5000) {
+        throw 'Termination-failure rejection exceeded the bounded deadline.'
     }
-    finally {
-        $killFailureStopwatch.Stop()
-        if ($null -eq $killFailureChild -and (Test-Path -LiteralPath $killFailurePidPath)) {
-            try {
-                $killFailurePid = [int](Get-Content -LiteralPath $killFailurePidPath -Raw)
-                $killFailureChild = [System.Diagnostics.Process]::GetProcessById($killFailurePid)
-            }
-            catch { }
-        }
-        if ($null -ne $killFailureChild) {
-            try {
-                if (-not $killFailureChild.HasExited) {
-                    $killFailureChild.Kill($true)
-                    [void]$killFailureChild.WaitForExit(2000)
-                }
-            }
-            finally {
-                $killFailureChild.Dispose()
-            }
-        }
+    Assert-ProcessGone -PidPath $killFailurePidPath -Label 'primary kill failure'
+
+    $heldPipePidPath = Join-Path $temporaryRoot 'held-pipe-child.pid'
+    $heldPipe = New-FixtureEntry -Id 'TL-R0-900-HELD-PIPE' -Owner 'TL-R0-900' -Mode 'child_holds_pipe' -ClassName 'HeldPipeCase' -Timeout 5 -ExtraArguments @($heldPipePidPath)
+    Assert-Fails {
+        Invoke-ExpectedGreenEntries -Entries @($heldPipe) -Owner 'TL-R0-900'
+    } 'parent exit with a descendant holding redirected pipes'
+    Assert-ProcessGone -PidPath $heldPipePidPath -Label 'post-parent-exit held pipe'
+
+    $unsafePidPath = Join-Path $temporaryRoot 'unsafe-containment-child.pid'
+    $unsafeEntry = New-FixtureEntry -Id 'TL-R0-903-UNSAFE-CONTAINMENT' -Owner 'TL-R0-903' -Mode 'child_holds_pipe' -ClassName 'UnsafeContainmentCase' -Timeout 5 -ExtraArguments @($unsafePidPath)
+    $unsafeLaterPath = Join-Path $temporaryRoot 'unsafe-later-entry-ran.txt'
+    $unsafeLater = New-FixtureEntry -Id 'TL-R0-903-LATER' -Owner 'TL-R0-903' -Mode 'touch' -ClassName 'UnsafeLaterCase' -ExtraArguments @($unsafeLaterPath)
+    Assert-Fails {
+        Invoke-ExpectedGreenEntries -Entries @($unsafeEntry, $unsafeLater) -Owner 'TL-R0-903' -ContainmentResultHook { return $false }
+    } 'unsafe termination aborts remaining owner entries'
+    Assert-ProcessGone -PidPath $unsafePidPath -Label 'reported unsafe containment'
+    if (Test-Path -LiteralPath $unsafeLaterPath) {
+        throw 'Expected-green continued after an unsafe termination result.'
     }
 
     $quoted = New-FixtureEntry -Id 'TL-R0-900-ARGV-QUOTING' -Owner 'TL-R0-900' -Mode 'injection' -ClassName 'QuotedCase' -ExtraArguments @('value with spaces & | ; $()')

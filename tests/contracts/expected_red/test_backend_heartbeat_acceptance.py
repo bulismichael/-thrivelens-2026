@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
+import io
 import json
+import logging
 import re
 import sys
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from unittest.mock import patch
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -23,6 +27,19 @@ STATIC_ROOT = REPOSITORY_ROOT / "tests" / "contracts" / "fixtures" / "static"
 SERVER_CORRELATION_ID = "server-generated-id"
 SENSITIVE_CANARY = "TL_SENSITIVE_CANARY_7F3A"
 OPENAPI_DOCUMENT = load_json(OPENAPI_PATH)
+
+
+class _BoundedTextCapture(io.StringIO):
+    def __init__(self, shared_count: list[int], limit: int = 65536) -> None:
+        super().__init__()
+        self.shared_count = shared_count
+        self.limit = limit
+
+    def write(self, value: str) -> int:
+        self.shared_count[0] += len(value.encode("utf-8", errors="replace"))
+        if self.shared_count[0] > self.limit:
+            raise AssertionError("ASGI request emitted output above the privacy capture limit")
+        return super().write(value)
 
 
 @dataclass
@@ -120,7 +137,56 @@ def _request(
     query_string: bytes = b"",
     body: bytes = b"",
 ) -> tuple[int, dict[str, str], bytes]:
-    return asyncio.run(_asgi_request_async(app, method, path, headers, query_string, body))
+    shared_count = [0]
+    stdout = _BoundedTextCapture(shared_count)
+    stderr = _BoundedTextCapture(shared_count)
+    logger_call_count = 0
+    bounded_logger_values: list[str] = []
+
+    def capture_logger_call(*args: Any, **kwargs: Any) -> None:
+        nonlocal logger_call_count
+        logger_call_count += 1
+        if len(bounded_logger_values) >= 16:
+            return
+        for value in (*args, *kwargs.values()):
+            if isinstance(value, bytes):
+                bounded_logger_values.append(value[:4096].decode("utf-8", errors="replace"))
+            elif isinstance(value, str):
+                bounded_logger_values.append(value[:4096])
+            elif isinstance(value, logging.LogRecord):
+                message = value.msg
+                if isinstance(message, str):
+                    bounded_logger_values.append(message[:4096])
+
+    with (
+        contextlib.redirect_stdout(stdout),
+        contextlib.redirect_stderr(stderr),
+        patch.object(logging.Logger, "_log", autospec=True, side_effect=capture_logger_call),
+        patch.object(logging.Logger, "handle", autospec=True, side_effect=capture_logger_call),
+        patch.object(logging.Logger, "callHandlers", autospec=True, side_effect=capture_logger_call),
+    ):
+        result = asyncio.run(
+            _asgi_request_async(app, method, path, headers, query_string, body)
+        )
+
+    captured_text = stdout.getvalue() + stderr.getvalue() + "\n".join(bounded_logger_values)
+    sensitive_values = [
+        SENSITIVE_CANARY,
+        path,
+        query_string.decode("utf-8", errors="replace"),
+        body.decode("utf-8", errors="replace"),
+    ]
+    sensitive_values.extend(
+        value
+        for key, value in (headers or {}).items()
+        if key.lower() in {"authorization", "x-private-value", "host", "origin"}
+    )
+    for sensitive in sensitive_values:
+        if sensitive and sensitive in captured_text:
+            raise AssertionError("ASGI request emitted forbidden request data")
+    if stdout.getvalue() or stderr.getvalue() or logger_call_count:
+        raise AssertionError("ASGI request emitted unexpected stdout, stderr, or Python logging")
+    return result
 
 
 def _json(body: bytes) -> dict[str, Any]:
@@ -423,10 +489,20 @@ class BackendHeartbeatAcceptanceTests(unittest.TestCase):
                 "rejected",
             ),
             (
-                "rejected request route",
+                "rejected OPTIONS",
+                _Probe(),
+                "OPTIONS",
+                "/api/v1/health/live",
+                {},
+                405,
+                "#/components/schemas/RequestRejectedResponse",
+                "rejected",
+            ),
+            (
+                "route/status rejection",
                 _Probe(),
                 "GET",
-                f"/api/v1/{SENSITIVE_CANARY}",
+                f"/api/v1/system/status/{SENSITIVE_CANARY}",
                 {},
                 404,
                 "#/components/schemas/RequestRejectedResponse",
