@@ -19,14 +19,14 @@
       "required_reviewers": ["product_systems_architect", "quality_engineer", "security_privacy_reviewer"],
       "evidence": {"commits": ["794794f10f53b0c8caaaac6c84fa3fc549d8ee70"], "test_reports": ["docs/program/evidence/test-reports/TL-R0-001/794794f10f53b0c8caaaac6c84fa3fc549d8ee70/report.json"], "reviews": ["docs/program/evidence/reviews/TL-R0-001/794794f10f53b0c8caaaac6c84fa3fc549d8ee70/product.json", "docs/program/evidence/reviews/TL-R0-001/794794f10f53b0c8caaaac6c84fa3fc549d8ee70/quality.json", "docs/program/evidence/reviews/TL-R0-001/794794f10f53b0c8caaaac6c84fa3fc549d8ee70/security.json"], "screenshots": [], "notes": ["Eight Wave 0 reports received", "Independent product, quality, and security review iterated until no unresolved high finding remained", "All 76 validator regressions pass under normal and optimized Python on the canonical implementation commit", "The strict resource-policy suite passes at 0.002 GB against the 18 GB cap"]},
       "blockers": [],
-      "next_action": "Finish TL-R0-002 verification, then keep TL-R0-003 blocked until the human-authorized counted WSL continuation passes real runtime gates"
+      "next_action": "Keep TL-R0-003 blocked until the human-authorized counted WSL continuation passes real runtime gates"
     },
     {
       "id": "TL-R0-002",
       "release": "R0",
       "title": "Freeze heartbeat contracts and capture expected-red tests",
       "objective": "Publish canonical closed schemas and a passing harness proving named implementation tests are red for the expected missing behavior.",
-      "status": "READY",
+      "status": "VERIFIED",
       "owner_agent": "backend_domain_engineer",
       "dependencies": ["TL-R0-001"],
       "owned_paths": ["tests/contracts/**", "scripts/contracts/**", "docs/program/task-notes/r0/contract-design.md"],
@@ -36,9 +36,9 @@
       "acceptance_criteria": ["OpenAPI validates and recursively closes every object schema", "Readiness structured 503 and mobile degraded 200 are distinct", "The automatic web heartbeat is same-origin: local/test FastAPI serves the built Flutter assets and /api/v1 without CORS; Origin/OPTIONS and production-negative tests freeze that boundary", "Android debug uses adb reverse tcp:8000 tcp:8000 to the still-loopback-only API, debug-only cleartext, cleanup, and a release-negative base/network policy", "No-store, loopback-only R0 mode, production-disabled policy, redacted errors, and bounded correlation are frozen", "The expected-red harness passes only when named tests are collected and fail for missing implementation rather than missing test tooling", "Executable expected-red self-test and expected-green handoff scripts are owned and created for downstream task-specific closure"],
       "required_tests": ["python scripts/contracts/validate_openapi.py", "python -m unittest discover -s tests/contracts -p test_schema_*.py", "python -m unittest discover -s tests/contracts -p test_android_transport_*.py", "pwsh -NoProfile -File scripts/contracts/test_expected_red_harness.ps1", "pwsh -NoProfile -File scripts/contracts/assert_expected_red.ps1 -Manifest tests/contracts/expected-red.json"],
       "required_reviewers": ["quality_engineer", "security_privacy_reviewer", "integration_release_lead"],
-      "evidence": {"commits": [], "test_reports": [], "reviews": [], "screenshots": [], "notes": []},
+      "evidence": {"commits": ["afb7b82a0d87f6efa446e387268d6526bf195749"], "test_reports": ["docs/program/evidence/test-reports/TL-R0-002/afb7b82a0d87f6efa446e387268d6526bf195749/report.json"], "reviews": ["docs/program/evidence/reviews/TL-R0-002/afb7b82a0d87f6efa446e387268d6526bf195749/quality.json", "docs/program/evidence/reviews/TL-R0-002/afb7b82a0d87f6efa446e387268d6526bf195749/security.json", "docs/program/evidence/reviews/TL-R0-002/afb7b82a0d87f6efa446e387268d6526bf195749/integration.json"], "screenshots": [], "notes": ["The canonical contract exposes exactly four R0 GET routes with ten closed fixtures and recursively closed schemas", "All 35 schema tests, 15 Android transport tests, 27 adversarial harness groups, and eight named expected-red cases passed on the canonical commit", "Independent product, quality, security, and integration reviews found no unresolved material issue", "The expected-red handoff remains implementation evidence only; it does not assert a running API, Android device, production authority, or human approval"]},
       "blockers": [],
-      "next_action": "Freeze the closed heartbeat schemas and capture named expected-red behavior with the executable harness"
+      "next_action": "Preserve the frozen contract while TL-R0-003 remains blocked; hand the five backend reds to TL-R0-005 and three Android reds to TL-R0-008 only after their dependencies are verified"
     },
     {
       "id": "TL-R0-003",
@@ -75,8 +75,8 @@
       "required_tests": ["pwsh -NoProfile -File scripts/dev/postgres/test_runtime.ps1", "python -m pytest services/api/tests/integration/postgres -q"],
       "required_reviewers": ["quality_engineer", "security_privacy_reviewer", "integration_release_lead"],
       "evidence": {"commits": [], "test_reports": [], "reviews": [], "screenshots": [], "notes": []},
-      "blockers": ["TL-R0-002 and TL-R0-003 not VERIFIED"],
-      "next_action": "Start after contract and runtime foundations are verified"
+      "blockers": ["TL-R0-003 not VERIFIED"],
+      "next_action": "Start after the real PostgreSQL runtime foundation is verified"
     },
     {
       "id": "TL-R0-005",
@@ -94,7 +94,7 @@
       "required_tests": ["python -m pytest services/api/tests -q", "python -m mypy services/api/src", "python -m ruff check services/api", "pwsh -NoProfile -File scripts/contracts/assert_expected_green.ps1 -Manifest tests/contracts/expected-red.json -Owner TL-R0-005"],
       "required_reviewers": ["quality_engineer", "security_privacy_reviewer", "integration_release_lead"],
       "evidence": {"commits": [], "test_reports": [], "reviews": [], "screenshots": [], "notes": []},
-      "blockers": ["TL-R0-002 and TL-R0-004 not VERIFIED"],
+      "blockers": ["TL-R0-004 not VERIFIED"],
       "next_action": "Implement from the captured red domain contract integration and security tests"
     },
     {
@@ -170,8 +170,8 @@
       "required_tests": ["pwsh -NoProfile -File scripts/quality/self_test.ps1", "pwsh -NoProfile -File scripts/quality/assert_clean_worktree.ps1"],
       "required_reviewers": ["security_privacy_reviewer", "integration_release_lead"],
       "evidence": {"commits": [], "test_reports": [], "reviews": [], "screenshots": [], "notes": []},
-      "blockers": ["TL-R0-002 and TL-R0-003 not VERIFIED"],
-      "next_action": "Build the harness as soon as the early contract and backend platform gates are stable"
+      "blockers": ["TL-R0-003 not VERIFIED"],
+      "next_action": "Build the harness after the real backend platform gate is verified"
     },
     {
       "id": "TL-R0-010",
@@ -189,7 +189,7 @@
       "required_tests": ["pwsh -NoProfile -File scripts/quality/run.ps1 -Tier 1", "pwsh -NoProfile -File scripts/quality/run.ps1 -Tier 2", "pwsh -NoProfile -File scripts/check_resource_budget.ps1", "pwsh -NoProfile -File scripts/quality/assert_clean_worktree.ps1"],
       "required_reviewers": ["product_systems_architect", "quality_engineer", "security_privacy_reviewer", "ux_design_director"],
       "evidence": {"commits": [], "test_reports": [], "reviews": [], "screenshots": [], "notes": []},
-      "blockers": ["TL-R0-001 through TL-R0-009 not VERIFIED"],
+      "blockers": ["TL-R0-003 through TL-R0-009 not VERIFIED"],
       "next_action": "Run only after every prerequisite task is independently reviewed and integrated"
     }
   ]

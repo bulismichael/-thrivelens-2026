@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "evidence_type": "independent_review",
+  "scope_id": "TL-R0-002",
+  "reviewed_commit": "afb7b82a0d87f6efa446e387268d6526bf195749",
+  "reviewer_role": "integration_release_lead",
+  "reviewed_at": "2026-08-11T22:11:36Z",
+  "findings": [
+    {
+      "severity": "HIGH",
+      "status": "RESOLVED",
+      "summary": "The five reviewed source-branch commits cherry-picked without conflict, and all 37 resulting paths are confined to TL-R0-002 owned or integration-owned contract, test, harness, and task-note paths with no forbidden-path change."
+    },
+    {
+      "severity": "HIGH",
+      "status": "RESOLVED",
+      "summary": "The integrated TL-R0-002 path projection is byte-identical to the independently reviewed terminal source commit, including sticky privacy overflow detection and bounded analyzer process-tree containment."
+    }
+  ],
+  "findings_dispositioned": true,
+  "test_evidence": [
+    "docs/program/evidence/test-reports/TL-R0-002/afb7b82a0d87f6efa446e387268d6526bf195749/report.json"
+  ],
+  "recommendation": "PASS",
+  "summary": "Integration review passes the exact canonical TL-R0-002 commit. The terminal contract content matches the product, security, and quality reviewed source bytes; all five required commands passed sequentially on main; the aggregate resource policy remains OK; no application, service, migration, package, infrastructure, runtime, approval, or production-authority boundary was changed."
+}
