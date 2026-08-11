@@ -3,7 +3,7 @@
   "allowed_states": ["NOT_STARTED", "SPECIFIED", "CODE_COMPLETE", "AUTOMATED_TESTED", "INTEGRATED", "EMULATOR_VERIFIED", "PHYSICAL_DEVICE_VERIFIED", "DATASET_EVALUATED", "DOMAIN_REVIEWED", "LANGUAGE_REVIEWED", "SECURITY_REVIEWED", "PILOT_READY", "PRODUCTION_APPROVED"],
   "features": [
     {"id": "TL-F-R0-AGENTS", "release": "R0", "name": "Project delivery contract and agent pool", "state": "CODE_COMPLETE", "task_ids": [], "evidence": ["commit:44515a0"], "human_gates": []},
-    {"id": "TL-F-R0-CONTROL", "release": "R0", "name": "Durable delivery control plane", "state": "SPECIFIED", "task_ids": ["TL-R0-001"], "evidence": ["task:TL-R0-001"], "human_gates": []},
+    {"id": "TL-F-R0-CONTROL", "release": "R0", "name": "Durable delivery control plane", "state": "INTEGRATED", "task_ids": ["TL-R0-001"], "evidence": ["task:TL-R0-001", "commit:794794f10f53b0c8caaaac6c84fa3fc549d8ee70", "report:docs/program/evidence/test-reports/TL-R0-001/794794f10f53b0c8caaaac6c84fa3fc549d8ee70/report.json"], "human_gates": []},
     {"id": "TL-F-R0-CONTRACT", "release": "R0", "name": "Canonical heartbeat and structured-error contracts", "state": "NOT_STARTED", "task_ids": ["TL-R0-002"], "evidence": [], "human_gates": []},
     {"id": "TL-F-R0-POSTGRES", "release": "R0", "name": "PostgreSQL migration-aware readiness", "state": "NOT_STARTED", "task_ids": ["TL-R0-003", "TL-R0-004"], "evidence": [], "human_gates": []},
     {"id": "TL-F-R0-API", "release": "R0", "name": "FastAPI liveness readiness status and version", "state": "NOT_STARTED", "task_ids": ["TL-R0-005"], "evidence": [], "human_gates": []},

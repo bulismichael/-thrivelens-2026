@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "evidence_type": "independent_review",
+  "scope_id": "TL-R0-001",
+  "reviewed_commit": "794794f10f53b0c8caaaac6c84fa3fc549d8ee70",
+  "reviewer_role": "product_systems_architect",
+  "reviewed_at": "2026-08-11T20:22:52Z",
+  "findings": [
+    {
+      "severity": "HIGH",
+      "status": "RESOLVED",
+      "summary": "Verification history now binds immutable task and evidence projections without freezing source bytes that explicit successor tasks must change."
+    },
+    {
+      "severity": "HIGH",
+      "status": "RESOLVED",
+      "summary": "Exact task, feature, decision, feature-gate, and feature-to-task semantics now reject coordinated deletion or substitution."
+    }
+  ],
+  "findings_dispositioned": true,
+  "test_evidence": [
+    "docs/program/evidence/test-reports/TL-R0-001/794794f10f53b0c8caaaac6c84fa3fc549d8ee70/report.json"
+  ],
+  "recommendation": "PASS",
+  "summary": "The exact candidate bytes later committed as the canonical TL-R0-001 implementation satisfy the R0 platform and product control-plane contract. Feature task links and exact schemas reject removal, substitution, reordering, addition, and shadow fields while intended execution-state and evidence fields remain mutable."
+}

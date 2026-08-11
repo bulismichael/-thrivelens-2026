@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "evidence_type": "test_report",
+  "task_id": "TL-R0-001",
+  "commit": "794794f10f53b0c8caaaac6c84fa3fc549d8ee70",
+  "generated_at": "2026-08-11T20:13:46Z",
+  "environment": {
+    "os": "windows",
+    "architecture": "x86_64",
+    "execution_context": "local"
+  },
+  "tool_versions": {
+    "python": "3.11.9",
+    "powershell": "7.6.3",
+    "git": "2.54.0.windows.1"
+  },
+  "duration_seconds": 351.572,
+  "resource_status": {
+    "cap_gb": 18,
+    "accounted_bytes": 1901987,
+    "status": "OK",
+    "host_free_memory_gb": 0.55
+  },
+  "commands": [
+    {
+      "command": "python scripts/validate_control_plane.py",
+      "exit_code": 0,
+      "duration_seconds": 10.216,
+      "result_count": 1,
+      "sanitized_failure": null
+    },
+    {
+      "command": "python -O scripts/validate_control_plane.py",
+      "exit_code": 0,
+      "duration_seconds": 10.101,
+      "result_count": 1,
+      "sanitized_failure": null
+    },
+    {
+      "command": "python -m unittest scripts/test_control_plane_validator.py",
+      "exit_code": 0,
+      "duration_seconds": 159.837,
+      "result_count": 76,
+      "sanitized_failure": null
+    },
+    {
+      "command": "python -O -m unittest scripts/test_control_plane_validator.py",
+      "exit_code": 0,
+      "duration_seconds": 153.554,
+      "result_count": 76,
+      "sanitized_failure": null
+    },
+    {
+      "command": "pwsh -NoProfile -File scripts/test_resource_budget.ps1",
+      "exit_code": 0,
+      "duration_seconds": 16.295,
+      "result_count": 5,
+      "sanitized_failure": null
+    },
+    {
+      "command": "pwsh -NoProfile -File scripts/check_resource_budget.ps1",
+      "exit_code": 0,
+      "duration_seconds": 1.461,
+      "result_count": 1,
+      "sanitized_failure": null
+    },
+    {
+      "command": "git diff --check --cached",
+      "exit_code": 0,
+      "duration_seconds": 0.108,
+      "result_count": 0,
+      "sanitized_failure": null
+    }
+  ],
+  "summary": "Every required TL-R0-001 command passed against the terminal canonical implementation commit. Both Python modes ran 76 tests, all five resource-policy mutation groups passed, and the strict 18 GB cap reported OK. Lifecycle-independent fixtures cover both pre-verification and verified states. Low host free memory increased suite duration, so installation and emulator work remain paused."
+}

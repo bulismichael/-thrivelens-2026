@@ -7,7 +7,7 @@
       "release": "R0",
       "title": "Synthesize and validate the R0 control plane",
       "objective": "Create a source-grounded and semantically validated control plane that makes the first implementation tasks executable.",
-      "status": "CHANGES_REQUIRED",
+      "status": "VERIFIED",
       "owner_agent": "integration_release_lead",
       "dependencies": [],
       "owned_paths": [".gitignore", "AGENTS.md", "docs/program/PRODUCT_CHARTER.md", "docs/program/SCOPE_AND_NON_GOALS.md", "docs/program/RELEASE_PLAN.md", "docs/program/PROJECT_STATE.md", "docs/program/TASK_GRAPH.yaml", "docs/program/FEATURE_REGISTRY.yaml", "docs/program/DECISIONS_REQUIRED.md", "docs/program/HUMAN_APPROVALS.md", "docs/program/TRACEABILITY_MATRIX.md", "docs/program/QUALITY_GATES.md", "docs/program/PERFORMANCE_BUDGETS.md", "docs/program/RISK_REGISTER.md", "docs/program/releases/R0_FOUNDATION_HEARTBEAT.md", "docs/architecture/DECISION_LOG.md", "docs/architecture/DATA_FLOW.md", "docs/ux/INFORMATION_ARCHITECTURE.md", "docs/ux/DESIGN_SYSTEM.md", "docs/security/THREAT_MODEL.md", "docs/privacy/DATA_INVENTORY.md", "config/resource-budget.json", "config/r0-network-policy.json", "scripts/check_resource_budget.ps1", "scripts/lib/ResourceBudget.psm1", "scripts/test_resource_budget.ps1", "scripts/validate_control_plane.py", "scripts/test_control_plane_validator.py"],
@@ -17,16 +17,16 @@
       "acceptance_criteria": ["All required control documents exist and feed an active task or gate", "The graph has at most ten dependency-feasible atomic tasks with independent reviewers and no parallel owned-path collision", "Every task has exact task-scoped integration-owned test-report review and screenshot staging routes so implementers cannot self-stage independent review evidence", "New and retained VERIFIED states bind canonical implementation commits, metadata checkpoints, immutable task projections, evidence references, and stage-zero evidence blob identities without freezing downstream owned source files", "Every tracked or staged evidence file is typed and referenced; bounded content-validated PNG screenshots are the only binary exception", "Human approval ledgers are append-only with per-event actors and feature release artifact scope without granting blanket decision authority", "Resource policy is non-overridable, sanitized on success and failure, uses unrounded threshold decisions, is strict at the cap, reparse-safe, and aggregates configured roots", "Feature and human states match verifiable commit, report, device, dataset, review, and feature-specific approval evidence", "Same-origin web and mandatory Android R0 execution contracts are feasible and independently reviewed", "Independent product, quality, and security re-review has no unresolved high finding"],
       "required_tests": ["python scripts/validate_control_plane.py", "python -O scripts/validate_control_plane.py", "python -m unittest scripts/test_control_plane_validator.py", "python -O -m unittest scripts/test_control_plane_validator.py", "pwsh -NoProfile -File scripts/test_resource_budget.ps1", "pwsh -NoProfile -File scripts/check_resource_budget.ps1", "git diff --check --cached"],
       "required_reviewers": ["product_systems_architect", "quality_engineer", "security_privacy_reviewer"],
-      "evidence": {"commits": ["44515a0"], "test_reports": [], "reviews": [], "screenshots": [], "notes": ["Eight Wave 0 reports received", "Four independent review passes produced progressively stricter corrections", "Fourth-pass product passed; quality/security highs have candidate corrections and require re-review"]},
-      "blockers": ["Independent re-review required after corrections"],
-      "next_action": "Correct all independent findings, stage for full diff validation, rerun tests, and request re-review"
+      "evidence": {"commits": ["794794f10f53b0c8caaaac6c84fa3fc549d8ee70"], "test_reports": ["docs/program/evidence/test-reports/TL-R0-001/794794f10f53b0c8caaaac6c84fa3fc549d8ee70/report.json"], "reviews": ["docs/program/evidence/reviews/TL-R0-001/794794f10f53b0c8caaaac6c84fa3fc549d8ee70/product.json", "docs/program/evidence/reviews/TL-R0-001/794794f10f53b0c8caaaac6c84fa3fc549d8ee70/quality.json", "docs/program/evidence/reviews/TL-R0-001/794794f10f53b0c8caaaac6c84fa3fc549d8ee70/security.json"], "screenshots": [], "notes": ["Eight Wave 0 reports received", "Independent product, quality, and security review iterated until no unresolved high finding remained", "All 76 validator regressions pass under normal and optimized Python on the canonical implementation commit", "The strict resource-policy suite passes at 0.002 GB against the 18 GB cap"]},
+      "blockers": [],
+      "next_action": "Begin dependency-feasible TL-R0-002 contract work and TL-R0-003 platform bootstrap work"
     },
     {
       "id": "TL-R0-002",
       "release": "R0",
       "title": "Freeze heartbeat contracts and capture expected-red tests",
       "objective": "Publish canonical closed schemas and a passing harness proving named implementation tests are red for the expected missing behavior.",
-      "status": "BLOCKED",
+      "status": "READY",
       "owner_agent": "backend_domain_engineer",
       "dependencies": ["TL-R0-001"],
       "owned_paths": ["tests/contracts/**", "scripts/contracts/**", "docs/program/task-notes/r0/contract-design.md"],
@@ -37,15 +37,15 @@
       "required_tests": ["python scripts/contracts/validate_openapi.py", "python -m unittest discover -s tests/contracts -p test_schema_*.py", "python -m unittest discover -s tests/contracts -p test_android_transport_*.py", "pwsh -NoProfile -File scripts/contracts/test_expected_red_harness.ps1", "pwsh -NoProfile -File scripts/contracts/assert_expected_red.ps1 -Manifest tests/contracts/expected-red.json"],
       "required_reviewers": ["quality_engineer", "security_privacy_reviewer", "integration_release_lead"],
       "evidence": {"commits": [], "test_reports": [], "reviews": [], "screenshots": [], "notes": []},
-      "blockers": ["TL-R0-001 not VERIFIED"],
-      "next_action": "Begin after TL-R0-001 is VERIFIED"
+      "blockers": [],
+      "next_action": "Freeze the closed heartbeat schemas and capture named expected-red behavior with the executable harness"
     },
     {
       "id": "TL-R0-003",
       "release": "R0",
       "title": "Bootstrap the backend and real PostgreSQL foundation",
       "objective": "Pin a reversible Python and real PostgreSQL development foundation without coupling backend progress to Android licence acceptance.",
-      "status": "BLOCKED",
+      "status": "READY",
       "owner_agent": "platform_observability_engineer",
       "dependencies": ["TL-R0-001"],
       "owned_paths": ["config/toolchains/backend.json", "scripts/bootstrap/backend/**", "scripts/dev/postgres/**", "infra/compose.yaml", "README.md", ".env.example", "docs/program/task-notes/r0/platform.md"],
@@ -56,7 +56,7 @@
       "required_tests": ["pwsh -NoProfile -File scripts/check_resource_budget.ps1", "pwsh -NoProfile -File scripts/dev/postgres/preflight.ps1", "pwsh -NoProfile -File scripts/dev/postgres/test_runtime.ps1", "pwsh -NoProfile -File scripts/check_resource_budget.ps1"],
       "required_reviewers": ["quality_engineer", "security_privacy_reviewer", "integration_release_lead"],
       "evidence": {"commits": [], "test_reports": [], "reviews": [], "screenshots": [], "notes": []},
-      "blockers": ["TL-R0-001 not VERIFIED", "Exact PostgreSQL archive provenance and operation not yet verified"],
+      "blockers": [],
       "next_action": "Verify immutable official artifacts and projected sizes before any download"
     },
     {
