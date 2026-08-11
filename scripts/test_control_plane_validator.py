@@ -191,6 +191,8 @@ class ControlPlaneValidatorTests(unittest.TestCase):
 
     def test_active_task_with_unverified_dependency_is_rejected(self) -> None:
         graph = copy.deepcopy(self.graph)
+        graph["tasks"][0]["status"] = "READY"
+        graph["tasks"][0]["blockers"] = []
         graph["tasks"][1]["status"] = "READY"
         with self.assertRaisesRegex(validator.ControlPlaneError, "unverified dependencies"):
             validator.validate_tasks(graph, self.texts)
@@ -555,6 +557,11 @@ class ControlPlaneValidatorTests(unittest.TestCase):
 
     def test_control_task_retains_gitignore_ownership(self) -> None:
         graph = copy.deepcopy(self.graph)
+        graph["tasks"][0]["status"] = "READY"
+        graph["tasks"][0]["blockers"] = []
+        for task in graph["tasks"][1:3]:
+            task["status"] = "BLOCKED"
+            task["blockers"] = ["Synthetic dependency fixture"]
         graph["tasks"][0]["owned_paths"].remove(".gitignore")
         with self.assertRaisesRegex(validator.ControlPlaneError, "own its staged .gitignore"):
             validator.validate_tasks(graph, self.texts)
@@ -620,6 +627,9 @@ class ControlPlaneValidatorTests(unittest.TestCase):
 
     def test_device_states_require_matching_surface_and_current_commit(self) -> None:
         registry = copy.deepcopy(self.registry)
+        control = next(item for item in registry["features"] if item["id"] == "TL-F-R0-CONTROL")
+        control["state"] = "SPECIFIED"
+        control["evidence"] = ["task:TL-R0-001"]
         feature = next(item for item in registry["features"] if item["id"] == "TL-F-R0-MOBILE")
         feature["state"] = "PHYSICAL_DEVICE_VERIFIED"
         feature["evidence"] = ["device:device", "approval:TL-D-013/TL-D-013-G-0001"]
@@ -630,7 +640,14 @@ class ControlPlaneValidatorTests(unittest.TestCase):
         approvals = dict(self.approval_states)
         approvals["TL-D-013"] = self.valid_approval("TL-D-013", feature, ["44515a0"])
         device = self.valid_device_report(feature["id"], surface="android_emulator")
-        with patch.object(validator, "load_typed_evidence", return_value=device), self.assertRaisesRegex(validator.ControlPlaneError, "physical-surface"):
+        control_report = self.valid_test_report(
+            tasks["TL-R0-001"], commit=tasks["TL-R0-001"]["evidence"]["commits"][0]
+        )
+        with patch.object(
+            validator,
+            "load_typed_evidence",
+            side_effect=lambda _, evidence_type: control_report if evidence_type == "test_report" else device,
+        ), self.assertRaisesRegex(validator.ControlPlaneError, "physical-surface"):
             validator.validate_features(registry, tasks, approvals)
 
     def test_dataset_report_requires_dataset_licence_decision(self) -> None:
@@ -646,13 +663,23 @@ class ControlPlaneValidatorTests(unittest.TestCase):
         tasks["TL-R0-008"]["status"] = "VERIFIED"
         tasks["TL-R0-008"]["evidence"]["commits"] = ["44515a0"]
         registry = copy.deepcopy(self.registry)
+        control = next(item for item in registry["features"] if item["id"] == "TL-F-R0-CONTROL")
+        control["state"] = "SPECIFIED"
+        control["evidence"] = ["task:TL-R0-001"]
         feature = next(item for item in registry["features"] if item["id"] == "TL-F-R0-MOBILE")
         feature["state"] = "PHYSICAL_DEVICE_VERIFIED"
         feature["evidence"] = ["device:device", "approval:TL-D-013/TL-D-013-G-0001"]
         approvals = dict(self.approval_states)
         approvals["TL-D-013"] = self.valid_approval("TL-D-013", feature, ["44515a0"])
         device = self.valid_device_report(feature["id"], commit="fc57594")
-        with patch.object(validator, "load_typed_evidence", return_value=device), self.assertRaisesRegex(
+        control_report = self.valid_test_report(
+            tasks["TL-R0-001"], commit=tasks["TL-R0-001"]["evidence"]["commits"][0]
+        )
+        with patch.object(
+            validator,
+            "load_typed_evidence",
+            side_effect=lambda _, evidence_type: control_report if evidence_type == "test_report" else device,
+        ), self.assertRaisesRegex(
             validator.ControlPlaneError, "non-current commit"
         ):
             validator.validate_features(registry, tasks, approvals)
@@ -740,8 +767,11 @@ class ControlPlaneValidatorTests(unittest.TestCase):
         registry = copy.deepcopy(self.registry)
         registry["features"][1]["state"] = "INTEGRATED"
         registry["features"][1]["evidence"] = ["task:TL-R0-001"]
+        tasks = copy.deepcopy(self.task_map())
+        tasks["TL-R0-001"]["status"] = "READY"
+        tasks["TL-R0-001"]["blockers"] = []
         with self.assertRaisesRegex(validator.ControlPlaneError, "requires verified linked tasks"):
-            validator.validate_features(registry, self.task_map(), self.approval_states)
+            validator.validate_features(registry, tasks, self.approval_states)
 
     def test_code_complete_feature_rejects_missing_commit(self) -> None:
         registry = copy.deepcopy(self.registry)
