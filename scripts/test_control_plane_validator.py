@@ -191,10 +191,12 @@ class ControlPlaneValidatorTests(unittest.TestCase):
 
     def test_active_task_with_unverified_dependency_is_rejected(self) -> None:
         graph = copy.deepcopy(self.graph)
-        graph["tasks"][0]["status"] = "READY"
-        graph["tasks"][0]["blockers"] = []
-        graph["tasks"][1]["status"] = "READY"
-        with self.assertRaisesRegex(validator.ControlPlaneError, "unverified dependencies"):
+        task = next(item for item in graph["tasks"] if item["id"] == "TL-R0-004")
+        task["status"] = "READY"
+        task["blockers"] = []
+        with patch.object(validator, "validate_verification_candidate"), patch.object(
+            validator, "git_commit_paths", return_value=["scripts/validate_control_plane.py"]
+        ), self.assertRaisesRegex(validator.ControlPlaneError, "unverified dependencies"):
             validator.validate_tasks(graph, self.texts)
 
     def test_unavailable_test_script_is_rejected(self) -> None:
@@ -557,13 +559,10 @@ class ControlPlaneValidatorTests(unittest.TestCase):
 
     def test_control_task_retains_gitignore_ownership(self) -> None:
         graph = copy.deepcopy(self.graph)
-        graph["tasks"][0]["status"] = "READY"
-        graph["tasks"][0]["blockers"] = []
-        for task in graph["tasks"][1:3]:
-            task["status"] = "BLOCKED"
-            task["blockers"] = ["Synthetic dependency fixture"]
         graph["tasks"][0]["owned_paths"].remove(".gitignore")
-        with self.assertRaisesRegex(validator.ControlPlaneError, "own its staged .gitignore"):
+        with patch.object(validator, "validate_verification_candidate"), patch.object(
+            validator, "git_commit_paths", return_value=["scripts/validate_control_plane.py"]
+        ), self.assertRaisesRegex(validator.ControlPlaneError, "own its staged .gitignore"):
             validator.validate_tasks(graph, self.texts)
 
     def test_pending_approval_blocks_human_attested_feature_state(self) -> None:
@@ -765,11 +764,12 @@ class ControlPlaneValidatorTests(unittest.TestCase):
 
     def test_integrated_feature_requires_verified_linked_tasks(self) -> None:
         registry = copy.deepcopy(self.registry)
-        registry["features"][1]["state"] = "INTEGRATED"
-        registry["features"][1]["evidence"] = ["task:TL-R0-001"]
+        feature = next(item for item in registry["features"] if item["id"] == "TL-F-R0-CONTRACT")
+        feature["state"] = "INTEGRATED"
+        feature["evidence"] = ["task:TL-R0-002"]
         tasks = copy.deepcopy(self.task_map())
-        tasks["TL-R0-001"]["status"] = "READY"
-        tasks["TL-R0-001"]["blockers"] = []
+        tasks["TL-R0-002"]["status"] = "READY"
+        tasks["TL-R0-002"]["blockers"] = []
         with self.assertRaisesRegex(validator.ControlPlaneError, "requires verified linked tasks"):
             validator.validate_features(registry, tasks, self.approval_states)
 
