@@ -1,0 +1,37 @@
+# Project-local toolchains and caches are deliberately kept inside the workspace
+# so scripts/check_resource_budget.ps1 can account for the complete delivery footprint.
+.tooling/
+.cache/
+.venv/
+**/.venv/
+**/node_modules/
+**/.dart_tool/
+**/.gradle/
+**/.next/
+**/build/
+**/dist/
+**/coverage/
+**/.coverage
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/__pycache__/
+*.py[cod]
+
+# Local runtime state and credentials.
+.env
+.env.*
+!.env.example
+data/
+logs/
+*.log
+*.pid
+*.pem
+*.pfx
+*.key
+
+# IDE and operating-system state.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
