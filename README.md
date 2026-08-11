@@ -4,7 +4,7 @@ ThriveLens is being delivered release-by-release. R0 is the foundation heartbeat
 
 ## Current platform status
 
-- CPython 3.13.15 is pinned to the Python Software Foundation's x86-64 installer. The local verifier enforces the official SHA-256 and PSF Authenticode signature. The upstream Sigstore bundle is recorded for provenance but is **not enforced** by these scripts.
+- CPython 3.13.15 provenance is pinned to the Python Software Foundation's x86-64 installer. Installation is hard-disabled because the known artifact/target subtotal excludes TEMP/TMP scratch and persistent installer-cache bytes and their counted paths. The verifier specifies official SHA-256 and PSF Authenticode checks; the upstream Sigstore bundle is recorded but **not enforced**.
 - The EDB PostgreSQL 17.10-2 Windows binaries ZIP is **rejected for runtime**, not merely awaiting a local checksum: EDB publishes no archive checksum or detached signature. The portable ZIP path and the interactive Windows installer path are both hard-disabled.
 - WSL PostgreSQL is therefore required but **not activated**. A human must authorize the system change, pin a distribution-signed exact package, and establish dedicated aggregate-counted WSL storage first.
 - The PostgreSQL-only Compose contract is a secondary, default-disabled option for compatible CI/developer hosts. Docker Desktop is not required or installed for R0, and engine storage accounting is not configured.
@@ -37,9 +37,9 @@ The first three should pass. The last command is expected to return `BLOCKED` wi
 
 ## Provisioning boundary
 
-There is no approved Windows PostgreSQL provisioning sequence. Do not download the EDB ZIP or use the interactive EDB installer for this task. The dormant ZIP installer code remains fail-closed and can only be reconsidered through a separate publisher-attestation and security review.
+There is no approved Windows PostgreSQL provisioning sequence. Do not download the EDB ZIP or use the interactive EDB installer for this task. `install_postgres.ps1` is a small unconditional structured blocker: it never opens or extracts an archive and contains no dormant extraction route.
 
-Future Python provisioning must use an artifact beneath `%LOCALAPPDATA%\ThriveLens`, then pass the pre-mutation projection/free-disk gate, official hash and Authenticode checks, a no-follow installed-tree ceiling, and the post-mutation aggregate gate. PostgreSQL initialization cannot be enabled until the integration owner first updates `docs/privacy/DATA_INVENTORY.md`; that required document is outside TL-R0-003 ownership.
+There is likewise no approved Python provisioning sequence. `install_python.ps1` blocks before inspecting an artifact or starting a process. A future separately reviewed implementation must first measure and bound installer scratch/cache behavior, place every persistent path under aggregate accounting, and then restore pre/post resource gates. PostgreSQL initialization cannot be enabled until the integration owner updates `docs/privacy/DATA_INVENTORY.md`; that document is outside TL-R0-003 ownership.
 
 If an authorized WSL foundation is later delivered, `test_runtime.ps1` must prove real readiness, loopback-only ownership, exact versions from `postgres`, `pg_ctl`, `initdb`, and `pg_isready`, bounded start/stop, and exact process/listener absence **before** reporting PASS.
 
@@ -51,4 +51,4 @@ pwsh -NoProfile -File scripts/dev/postgres/stop.ps1
 
 ## Compose contract
 
-`infra/compose.yaml` has exactly one service, is disabled unless the explicit `postgres-explicit` profile is selected, fixes `platform: linux/amd64`, and pins that platform's child manifest digest. It binds only to `127.0.0.1`, uses an attributable bind directory instead of a named volume, requires a protected password file, and caps runtime memory. `validate_compose_inputs.ps1` remains blocked until container-engine storage accounting and the data inventory gate are configured. Copying `.env.example` creates neither storage nor a credential; both paths are intentionally blank.
+`infra/compose.yaml` has exactly one service, is disabled unless the explicit `postgres-explicit` profile is selected, fixes `platform: linux/amd64`, and pins that platform's child manifest digest. It binds only to `127.0.0.1` and accepts only the dedicated `%LOCALAPPDATA%\ThriveLens\data\postgresql\compose-r0` bind path. Initial activation requires that directory to be empty, non-root, non-reparse, and protected by the strict allowlisted directory ACL; the protected password file must be outside it. `validate_compose_inputs.ps1` also remains blocked until engine storage accounting and the data inventory gate are configured. Copying `.env.example` creates neither storage nor a credential.

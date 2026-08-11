@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "task_id": "TL-R0-003",
-  "status": "BLOCKED_WSL_FALLBACK_REQUIRES_HUMAN_AUTHORITY",
+  "status": "BLOCKED_FOUNDATION_REQUIRES_HUMAN_AUTHORITY_AND_ACCOUNTING",
   "target": {
     "os": "windows",
     "architecture": "x86_64",
@@ -14,10 +14,13 @@
     "aggregate_cap_bytes": 19327352832,
     "hard_stop_percent": 85,
     "minimum_free_disk_reserve_bytes": 536870912,
-    "python_worst_case_additional_bytes": 297888400,
+    "maximum_tree_entries": 50000,
+    "python_known_artifact_and_target_bytes": 297888400,
+    "python_worst_case_additional_bytes": null,
+    "python_projection_status": "INCOMPLETE_TEMP_AND_PERSISTENT_INSTALLER_CACHE_UNMEASURED",
     "postgresql_worst_case_additional_bytes": 1340560230,
     "postgresql_initialization_worst_case_additional_bytes": 134217728,
-    "worst_case_backend_additional_bytes": 1638448630
+    "worst_case_backend_additional_bytes": null
   },
   "python": {
     "implementation": "CPython",
@@ -33,6 +36,11 @@
     "maximum_installed_bytes": 268435456,
     "installed_size_status": "PROJECTION_CEILING_NOT_MEASURED",
     "install_root": "%LOCALAPPDATA%\\ThriveLens\\toolchains\\python\\3.13.15",
+    "install_enabled": false,
+    "installation_status": "BLOCKED_UNMEASURED_TEMP_AND_PERSISTENT_INSTALLER_CACHE",
+    "temporary_scratch_ceiling_bytes": null,
+    "persistent_installer_cache_ceiling_bytes": null,
+    "scratch_cache_counted_paths_status": "UNDEFINED",
     "integrity": {
       "algorithm": "SHA-256",
       "value": "edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403",
@@ -52,7 +60,7 @@
       "include_test_suite": false,
       "include_pip": true
     },
-    "rollback": "Run the same verified installer with /uninstall /quiet, confirm the dedicated install root is absent, and rerun the aggregate resource gate."
+    "rollback": "No Python mutation is permitted by this scaffold. A future separately reviewed installer must define its own verified uninstall and counted scratch/cache cleanup before enablement."
   },
   "postgresql": {
     "version": "17.10",
@@ -68,12 +76,11 @@
     "license_url": "https://www.postgresql.org/about/licence/",
     "bundled_component_licenses_status": "PENDING_ARCHIVE_INSPECTION_NO_LICENSE_ACCEPTED",
     "compressed_bytes": 333927270,
-    "maximum_extracted_binary_bytes": 805306368,
+    "projected_binary_footprint_ceiling_bytes": 805306368,
     "maximum_initial_cluster_bytes": 134217728,
     "maximum_synthetic_backup_bytes": 67108864,
     "maximum_total_postgresql_bytes": 1006632960,
-    "maximum_archive_entries": 50000,
-    "extracted_size_status": "PROJECTION_CEILING_NOT_MEASURED",
+    "binary_size_projection_status": "UNMEASURED_ARCHIVE_REJECTED_AND_NEVER_OPENED",
     "binary_root": "%LOCALAPPDATA%\\ThriveLens\\toolchains\\postgresql\\17.10-2\\pgsql",
     "data_root": "%LOCALAPPDATA%\\ThriveLens\\data\\postgresql\\r0",
     "log_root": "%LOCALAPPDATA%\\ThriveLens\\logs\\postgresql\\r0",
@@ -94,7 +101,7 @@
     "windows_portable_install_enabled": false,
     "windows_interactive_installer_status": "HARD_DISABLED",
     "rejection": "The EDB ZIP has no publisher SHA-256 or detached signature. HTTPS metadata, a locally computed hash, and signatures on a subset of extracted executables cannot attest the full archive.",
-    "rollback": "Stop only the dedicated cluster, confirm no process uses its data directory, then remove only the versioned binary/data/log directories after explicit authorization and rerun the aggregate resource gate."
+    "rollback": "No Windows PostgreSQL mutation is permitted by this scaffold, so no Windows rollback is currently required."
   },
   "wsl_fallback": {
     "trigger": "Required because the EDB portable Windows archive is rejected for runtime.",
@@ -122,8 +129,12 @@
     "enabled_by_default": false,
     "required_profile": "postgres-explicit",
     "platform": "linux/amd64",
-    "data_root_policy": "Bind storage must resolve beneath %LOCALAPPDATA%\\ThriveLens without any reparse component.",
-    "secret_acl_policy": "Inheritance disabled; read access only for the current user, LocalSystem, and BUILTIN Administrators.",
+    "data_root": "%LOCALAPPDATA%\\ThriveLens\\data\\postgresql\\compose-r0",
+    "data_root_policy": "The bind source must exactly equal the dedicated data_root, must not be the attributable root, must have a protected allowlisted ACL, and must be empty for initial activation.",
+    "initial_activation_requires_empty_data_root": true,
+    "directory_acl_policy": "Inheritance disabled; no Allow ACE outside the current user, LocalSystem, and BUILTIN Administrators; the current user must have explicit Modify rights.",
+    "password_must_be_outside_data_root": true,
+    "secret_acl_policy": "Inheritance disabled; no Allow ACE outside the current user, LocalSystem, and BUILTIN Administrators; the current user must have explicit effective read access.",
     "engine_storage_accounting_status": "REQUIRED_NOT_CONFIGURED",
     "engine_storage_accounting_policy": "Before activation, the integration owner must add the container engine image, layer, build-cache, and writable-layer storage to aggregate counted paths or run this contract on a disposable CI host with an independently enforced 18 GB cap.",
     "packaging_source": "https://github.com/docker-library/postgres",

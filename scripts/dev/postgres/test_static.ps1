@@ -41,6 +41,7 @@ try {
     $preflight = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'preflight.ps1') -Raw
     $runtimeTest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'test_runtime.ps1') -Raw
     $runtimeModule = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Runtime.psm1') -Raw
+    $securityTest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'test_security_controls.ps1') -Raw
     $composeValidator = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'validate_compose_inputs.ps1') -Raw
     $postgresInstaller = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts\bootstrap\backend\install_postgres.ps1') -Raw
     $pythonInstaller = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts\bootstrap\backend\install_python.ps1') -Raw
@@ -64,26 +65,32 @@ try {
     Assert-Condition ($preflight -match 'ProjectedAdditionalBytes') 'PROJECTED_RESOURCE_GATE'
     Assert-Condition ($preflight -match 'WINDOWS_POSTGRES_RUNTIME_REJECTED') 'REJECTED_WINDOWS_RUNTIME'
     Assert-Condition ($preflight -match 'WSL_FALLBACK_REQUIRED_NOT_ACTIVATED') 'WSL_REQUIRED_BLOCKER'
+    Assert-Condition ($preflight -match 'PYTHON_INSTALL_DISABLED_UNMEASURED_SCRATCH_CACHE') 'PYTHON_INSTALL_BLOCKER'
+    Assert-Condition ($preflight -match 'INSTALL_PROJECTION_UNAVAILABLE') 'PYTHON_PROJECTION_BLOCKER'
     Assert-Condition ($preflight -match 'Assert-ThriveLensPostgresVersions') 'RUNTIME_EXACT_VERSIONS'
     Assert-Condition ($runtimeTest.IndexOf("stop.ps1") -lt $runtimeTest.IndexOf("status = 'PASS'")) 'TEST_STOP_BEFORE_PASS'
-    Assert-Condition ($runtimeTest -match 'RUNTIME_CLEANUP_FAILED') 'TEST_CLEANUP_FAILURE'
+    Assert-Condition ($runtimeTest.IndexOf('$startInvoked = $true') -lt $runtimeTest.IndexOf("start.ps1")) 'TEST_MARKS_START_BEFORE_CHILD'
+    Assert-Condition ($runtimeTest -match 'if \(\$startInvoked\)[\s\S]+stop\.ps1[\s\S]+Assert-ThriveLensPostgresAbsent') 'TEST_NONZERO_START_INDEPENDENT_CLEANUP'
+    Assert-Condition ($runtimeTest -match 'Resolve-ThriveLensStartChildFailure') 'TEST_CHILD_FAILURE_CLASSIFIER'
+    Assert-Condition ($runtimeTest -match 'Resolve-ThriveLensRuntimeFailureOutcome') 'TEST_CLEANUP_OUTCOME_CLASSIFIER'
+    Assert-Condition ($runtimeTest -match 'POSTGRES_START_CLEANUP_FAILED') 'TEST_PRESERVES_START_FATAL'
+    Assert-Condition ($securityTest.IndexOf('finally {') -lt $securityTest.LastIndexOf('$preliminaryResponse | ConvertTo-Json')) 'SECURITY_PASS_AFTER_CLEANUP'
+    Assert-Condition ($securityTest -match 'SECURITY_FIXTURE_CLEANUP_FAILED') 'SECURITY_CLEANUP_FAILURE_FATAL'
 
-    Assert-Condition ($runtimeModule -match 'Assert-ThriveLensPostgresArchive') 'ARCHIVE_CENTRAL_SCAN'
-    Assert-Condition ($runtimeModule -match 'ARCHIVE_LINK_OR_SPECIAL_ENTRY_REJECTED') 'ARCHIVE_LINK_REJECT'
-    Assert-Condition ($runtimeModule -match 'ARCHIVE_DUPLICATE_PATH_REJECTED') 'ARCHIVE_DUPLICATE_REJECT'
+    Assert-Condition ($runtimeModule -notmatch '(?i)ZipArchive|\.Entries|Assert-ThriveLensPostgresArchive') 'NO_ARCHIVE_PARSER'
     Assert-Condition ($runtimeModule -match 'Assert-ThriveLensProjectedBudget') 'PROJECTED_BUDGET_PRIMITIVE'
     Assert-Condition ($runtimeModule -match 'Assert-ThriveLensFreeDiskBudget') 'PROJECTED_DISK_PRIMITIVE'
-    Assert-Condition ($runtimeModule -match 'SECRET_ACL_READ_ALLOWLIST_VIOLATION') 'SECRET_READ_ALLOWLIST'
+    Assert-Condition ($runtimeModule -match 'SECRET_ACL_ALLOWLIST_VIOLATION') 'SECRET_FULL_ALLOWLIST'
+    Assert-Condition ($runtimeModule -match 'Resolve-ThriveLensStartChildFailure') 'RUNTIME_CHILD_POLICY_PRIMITIVE'
+    Assert-Condition ($runtimeModule -match 'Resolve-ThriveLensRuntimeFailureOutcome') 'RUNTIME_CLEANUP_POLICY_PRIMITIVE'
+    Assert-Condition ($runtimeModule -match 'Assert-ThriveLensComposeDataDirectory') 'COMPOSE_EXACT_DIRECTORY_PRIMITIVE'
+    Assert-Condition ($runtimeModule -match 'Assert-ThriveLensPathOutsideDirectory') 'COMPOSE_DISJOINT_PATH_PRIMITIVE'
     Assert-Condition ($runtimeModule -match "ValidateSet\('postgres', 'pg_ctl', 'initdb', 'pg_isready'\)") 'FOUR_EXACT_VERSION_TOOLS'
 
     Assert-Condition ($postgresInstaller -match 'WINDOWS_POSTGRES_INSTALL_DISABLED') 'POSTGRES_INSTALL_HARD_DISABLED'
-    Assert-Condition ($postgresInstaller.IndexOf('Assert-ThriveLensPostgresArchive') -lt $postgresInstaller.IndexOf('Expand-Archive')) 'ARCHIVE_SCAN_BEFORE_EXTRACT'
-    Assert-Condition ($postgresInstaller.IndexOf('Assert-ThriveLensPostgresVersions') -lt $postgresInstaller.IndexOf('Move-Item')) 'VERSION_BEFORE_MOVE'
-    Assert-Condition ($postgresInstaller -match 'Measure-ThriveLensSafeTree') 'POSTGRES_NOFOLLOW_RESCAN'
-    Assert-Condition ($postgresInstaller -match 'Invoke-ThriveLensResourceGate') 'POSTGRES_POST_RESOURCE_GATE'
-    Assert-Condition ($pythonInstaller -match '-InstallKind Python') 'PYTHON_PROJECTED_PREFLIGHT'
-    Assert-Condition ($pythonInstaller -match 'Measure-ThriveLensSafeTree') 'PYTHON_NOFOLLOW_RESCAN'
-    Assert-Condition ($pythonInstaller -match 'Invoke-ThriveLensResourceGate') 'PYTHON_POST_RESOURCE_GATE'
+    Assert-Condition ($postgresInstaller -notmatch '(?i)Expand-Archive|ZipArchive|Get-Item|Get-Content|Test-Path|Move-Item|Start-Process') 'POSTGRES_BLOCK_BEFORE_ARTIFACT_USE'
+    Assert-Condition ($pythonInstaller -match 'PYTHON_INSTALL_DISABLED_UNMEASURED_SCRATCH_CACHE') 'PYTHON_INSTALL_HARD_DISABLED'
+    Assert-Condition ($pythonInstaller -notmatch '(?i)Start-Process|Get-Item|Get-Content|Test-Path|Get-FileHash|Invoke-ThriveLensResourceGate') 'PYTHON_BLOCK_BEFORE_ARTIFACT_PROCESS_USE'
 
     $compose = Get-Content -LiteralPath (Join-Path $projectRoot 'infra\compose.yaml') -Raw
     Assert-Condition ($compose -match '127\.0\.0\.1:\$\{TL_POSTGRES_PORT:-55432\}:5432') 'COMPOSE_LOOPBACK'
@@ -95,9 +102,13 @@ try {
     Assert-Condition ($compose -match 'POSTGRES_PASSWORD_FILE') 'COMPOSE_SECRET_FILE'
     Assert-Condition ($compose -notmatch 'POSTGRES_PASSWORD\s*:') 'COMPOSE_NO_INLINE_PASSWORD'
     Assert-Condition ($compose -match 'type: bind') 'COMPOSE_COUNTED_BIND'
-    Assert-Condition ($compose -match 'TL_POSTGRES_COMPOSE_DATA_DIR') 'COMPOSE_DATA_ENV'
+    Assert-Condition ($compose -match '\$\{LOCALAPPDATA:\?LOCALAPPDATA is required\}/ThriveLens/data/postgresql/compose-r0') 'COMPOSE_EXACT_DATA_BIND'
     Assert-Condition ($compose -notmatch '(?m)^volumes:') 'COMPOSE_NO_NAMED_VOLUME'
     Assert-Condition ($composeValidator -match 'COMPOSE_ENGINE_STORAGE_ACCOUNTING_REQUIRED') 'COMPOSE_ACCOUNTING_GATE'
+    Assert-Condition ($composeValidator -match 'Assert-ThriveLensComposeDataDirectory') 'COMPOSE_EXACT_DATA_GATE'
+    Assert-Condition ($composeValidator -match 'COMPOSE_DATA_DIRECTORY_NOT_EMPTY') 'COMPOSE_EMPTY_DATA_GATE'
+    Assert-Condition ($composeValidator -match 'Assert-ThriveLensPathOutsideDirectory') 'COMPOSE_DISJOINT_SECRET_GATE'
+    Assert-Condition ($composeValidator -match 'DIRECTORY_ACL_ALLOWLIST_VIOLATION') 'COMPOSE_DIRECTORY_ACL_GATE'
     Assert-Condition ($composeValidator -match 'Assert-ThriveLensSecretFileAcl') 'COMPOSE_SECRET_ACL_GATE'
 
     if ($failures.Count -gt 0) {

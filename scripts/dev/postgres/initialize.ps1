@@ -70,7 +70,7 @@ try {
     $clusterScan = Measure-ThriveLensSafeTree `
         -Root $paths.DataRoot `
         -MaximumBytes ([int64]$manifest.postgresql.maximum_initial_cluster_bytes) `
-        -MaximumEntries ([int]$manifest.postgresql.maximum_archive_entries)
+        -MaximumEntries ([int]$manifest.resource_policy.maximum_tree_entries)
     $response = [pscustomobject]@{
         schema_version = 1
         status = 'INITIALIZED'
@@ -93,7 +93,7 @@ catch {
         'SECRET_ACL_OWNER_UNVERIFIABLE',
         'SECRET_ACL_OWNER_REJECTED',
         'SECRET_ACL_IDENTITY_UNVERIFIABLE',
-        'SECRET_ACL_READ_ALLOWLIST_VIOLATION',
+        'SECRET_ACL_ALLOWLIST_VIOLATION',
         'SECRET_ACL_CURRENT_USER_READ_MISSING',
         'SECRET_ACL_CURRENT_USER_READ_UNAVAILABLE',
         'BOOTSTRAP_USER_INVALID',

@@ -9,6 +9,9 @@ $modulePath = Join-Path $PSScriptRoot 'Runtime.psm1'
 $failures = [Collections.Generic.List[string]]::new()
 $assertionCount = 0
 $fixtureRoot = $null
+$preliminaryResponse = $null
+$preliminaryExitCode = 2
+$cleanupSucceeded = $true
 
 function Assert-Condition {
     param([bool]$Condition, [string]$Code)
@@ -28,85 +31,57 @@ function Assert-ThrowsCode {
     Assert-Condition ($observed -ceq $Expected) $Code
 }
 
-function New-TestZip {
+function Set-SyntheticProtectedAcl {
+    param([Parameter(Mandatory)][string]$Path)
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $aclOutput = @(& icacls.exe $Path '/inheritance:r' '/grant:r' ("*$currentSid`:(F)") 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw 'SYNTHETIC_ACL_SETUP_FAILED' }
+    $aclOutput = $null
+}
+
+function Add-SyntheticEveryoneRight {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][object[]]$Entries
+        [Parameter(Mandatory)][ValidateSet('R', 'W')][string]$Right
     )
-    $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-    try {
-        $zip = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $false)
-        try {
-            foreach ($spec in $Entries) {
-                $entry = $zip.CreateEntry([string]$spec.Name)
-                if ($null -ne $spec.ExternalAttributes) {
-                    $entry.ExternalAttributes = [int]$spec.ExternalAttributes
-                }
-                if ($null -ne $spec.Content) {
-                    $bytes = [Text.Encoding]::UTF8.GetBytes([string]$spec.Content)
-                    $entryStream = $entry.Open()
-                    try { $entryStream.Write($bytes, 0, $bytes.Length) }
-                    finally { $entryStream.Dispose() }
-                }
-            }
+    $aclOutput = @(& icacls.exe $Path '/grant' ("*S-1-1-0:($Right)") 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw 'SYNTHETIC_ACL_MUTATION_FAILED' }
+    $aclOutput = $null
+}
+
+function Resolve-SecurityFixtureOutcome {
+    param(
+        [Parameter(Mandatory)][string]$PreliminaryStatus,
+        [Parameter(Mandatory)][int]$PreliminaryExitCode,
+        [Parameter(Mandatory)][bool]$CleanupSucceeded
+    )
+    if (-not $CleanupSucceeded) {
+        return [pscustomobject]@{
+            Status = 'ERROR'
+            Code = 'SECURITY_FIXTURE_CLEANUP_FAILED'
+            ExitCode = 3
         }
-        finally { $zip.Dispose() }
     }
-    finally { $stream.Dispose() }
+    return [pscustomobject]@{
+        Status = $PreliminaryStatus
+        Code = $null
+        ExitCode = $PreliminaryExitCode
+    }
 }
 
 try {
     Import-Module -Name $modulePath -Force
-    Add-Type -AssemblyName System.IO.Compression
     $attributableRoot = Get-ThriveLensAttributableRoot
     $fixtureParent = Assert-ThriveLensOwnedPath -Path (Join-Path $attributableRoot 'test-temp') -AllowMissing
     $fixtureRoot = Assert-ThriveLensOwnedPath -Path (Join-Path $fixtureParent ('security-' + [guid]::NewGuid().ToString('N'))) -AllowMissing
     $null = New-Item -ItemType Directory -Path $fixtureRoot -Force
-    $destination = Assert-ThriveLensOwnedPath -Path (Join-Path $fixtureRoot 'extract') -AllowMissing
 
-    $goodZip = Join-Path $fixtureRoot 'good.zip'
-    New-TestZip -Path $goodZip -Entries @(
-        [pscustomobject]@{ Name = 'pgsql/'; Content = $null; ExternalAttributes = $null },
-        [pscustomobject]@{ Name = 'pgsql/bin/postgres.exe'; Content = 'x'; ExternalAttributes = $null }
-    )
-    $goodScan = Assert-ThriveLensPostgresArchive -ArchivePath $goodZip -DestinationRoot $destination -MaximumEntries 10 -MaximumUncompressedBytes 10
-    Assert-Condition ($goodScan.Entries -eq 2 -and $goodScan.UncompressedBytes -eq 1) 'GOOD_ARCHIVE_SCAN'
-
-    $traversalZip = Join-Path $fixtureRoot 'traversal.zip'
-    New-TestZip -Path $traversalZip -Entries @(
-        [pscustomobject]@{ Name = 'pgsql/../escape'; Content = 'x'; ExternalAttributes = $null }
-    )
-    Assert-ThrowsCode { Assert-ThriveLensPostgresArchive -ArchivePath $traversalZip -DestinationRoot $destination -MaximumEntries 10 -MaximumUncompressedBytes 10 } `
-        'ARCHIVE_PATH_REJECTED' 'ARCHIVE_TRAVERSAL_REJECTED'
-
-    $duplicateZip = Join-Path $fixtureRoot 'duplicate.zip'
-    New-TestZip -Path $duplicateZip -Entries @(
-        [pscustomobject]@{ Name = 'pgsql/a'; Content = 'x'; ExternalAttributes = $null },
-        [pscustomobject]@{ Name = 'pgsql/A'; Content = 'y'; ExternalAttributes = $null }
-    )
-    Assert-ThrowsCode { Assert-ThriveLensPostgresArchive -ArchivePath $duplicateZip -DestinationRoot $destination -MaximumEntries 10 -MaximumUncompressedBytes 10 } `
-        'ARCHIVE_DUPLICATE_PATH_REJECTED' 'ARCHIVE_CASE_COLLISION_REJECTED'
-
-    $symlinkUnsigned = [uint32]::Parse('A1FF0000', [Globalization.NumberStyles]::HexNumber)
-    $symlinkAttributes = [BitConverter]::ToInt32([BitConverter]::GetBytes($symlinkUnsigned), 0)
-    $symlinkZip = Join-Path $fixtureRoot 'symlink.zip'
-    New-TestZip -Path $symlinkZip -Entries @(
-        [pscustomobject]@{ Name = 'pgsql/link'; Content = 'target'; ExternalAttributes = $symlinkAttributes }
-    )
-    Assert-ThrowsCode { Assert-ThriveLensPostgresArchive -ArchivePath $symlinkZip -DestinationRoot $destination -MaximumEntries 10 -MaximumUncompressedBytes 10 } `
-        'ARCHIVE_LINK_OR_SPECIAL_ENTRY_REJECTED' 'ARCHIVE_SYMLINK_REJECTED'
-
-    $reparseZip = Join-Path $fixtureRoot 'reparse.zip'
-    New-TestZip -Path $reparseZip -Entries @(
-        [pscustomobject]@{ Name = 'pgsql/reparse'; Content = 'x'; ExternalAttributes = [int][IO.FileAttributes]::ReparsePoint }
-    )
-    Assert-ThrowsCode { Assert-ThriveLensPostgresArchive -ArchivePath $reparseZip -DestinationRoot $destination -MaximumEntries 10 -MaximumUncompressedBytes 10 } `
-        'ARCHIVE_LINK_OR_SPECIAL_ENTRY_REJECTED' 'ARCHIVE_REPARSE_REJECTED'
-
-    Assert-ThrowsCode { Assert-ThriveLensPostgresArchive -ArchivePath $goodZip -DestinationRoot $destination -MaximumEntries 1 -MaximumUncompressedBytes 10 } `
-        'ARCHIVE_ENTRY_LIMIT_EXCEEDED' 'ARCHIVE_ENTRY_CEILING'
-    Assert-ThrowsCode { Assert-ThriveLensPostgresArchive -ArchivePath $goodZip -DestinationRoot $destination -MaximumEntries 10 -MaximumUncompressedBytes 0 } `
-        'ARCHIVE_UNCOMPRESSED_SIZE_EXCEEDED' 'ARCHIVE_SIZE_CEILING'
+    $mockCleanupFailure = Resolve-SecurityFixtureOutcome -PreliminaryStatus PASS -PreliminaryExitCode 0 -CleanupSucceeded $false
+    Assert-Condition (
+        $mockCleanupFailure.Status -ceq 'ERROR' -and
+        $mockCleanupFailure.Code -ceq 'SECURITY_FIXTURE_CLEANUP_FAILED' -and
+        $mockCleanupFailure.ExitCode -eq 3
+    ) 'FIXTURE_CLEANUP_FAILURE_ESCALATES'
 
     $treeRoot = Join-Path $fixtureRoot 'safe-tree'
     $null = New-Item -ItemType Directory -Path $treeRoot
@@ -138,37 +113,129 @@ try {
     Assert-ThrowsCode { Assert-ThriveLensVersionText -Tool postgres -Observed 'postgres (PostgreSQL) 17.10 extra' -Version '17.10' } `
         'POSTGRES_VERSION_OUTPUT_MISMATCH' 'VERSION_SUFFIX_REJECTED'
 
-    $secretPath = Join-Path $fixtureRoot 'secret.txt'
-    [IO.File]::WriteAllText($secretPath, 'synthetic-test-only')
-    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    $aclOutput = @(& icacls.exe $secretPath '/inheritance:r' '/grant:r' ("*$($currentSid.Value):(F)") 2>&1)
-    if ($LASTEXITCODE -ne 0) { throw 'SYNTHETIC_ACL_SETUP_FAILED' }
-    $aclOutput = $null
-    Assert-ThriveLensSecretFileAcl -Path $secretPath
+    $readSecretPath = Join-Path $fixtureRoot 'read-secret.txt'
+    [IO.File]::WriteAllText($readSecretPath, 'synthetic-test-only')
+    Set-SyntheticProtectedAcl -Path $readSecretPath
+    Assert-ThriveLensSecretFileAcl -Path $readSecretPath
     Assert-Condition $true 'STRICT_SECRET_ACL_ACCEPTED'
+    Add-SyntheticEveryoneRight -Path $readSecretPath -Right R
+    Assert-ThrowsCode { Assert-ThriveLensSecretFileAcl -Path $readSecretPath } `
+        'SECRET_ACL_ALLOWLIST_VIOLATION' 'BROAD_SECRET_READ_REJECTED'
 
-    $aclOutput = @(& icacls.exe $secretPath '/grant' '*S-1-1-0:(R)' 2>&1)
-    if ($LASTEXITCODE -ne 0) { throw 'SYNTHETIC_ACL_MUTATION_FAILED' }
-    $aclOutput = $null
-    Assert-ThrowsCode { Assert-ThriveLensSecretFileAcl -Path $secretPath } `
-        'SECRET_ACL_READ_ALLOWLIST_VIOLATION' 'BROAD_SECRET_READ_REJECTED'
+    $writeSecretPath = Join-Path $fixtureRoot 'write-secret.txt'
+    [IO.File]::WriteAllText($writeSecretPath, 'synthetic-test-only')
+    Set-SyntheticProtectedAcl -Path $writeSecretPath
+    Add-SyntheticEveryoneRight -Path $writeSecretPath -Right W
+    Assert-ThrowsCode { Assert-ThriveLensSecretFileAcl -Path $writeSecretPath } `
+        'SECRET_ACL_ALLOWLIST_VIOLATION' 'WRITE_ONLY_UNAPPROVED_SID_REJECTED'
+
+    $composeExpected = Join-Path $fixtureRoot 'compose-data'
+    $composeWrong = Join-Path $fixtureRoot 'wrong-data'
+    $null = New-Item -ItemType Directory -Path $composeExpected
+    $null = New-Item -ItemType Directory -Path $composeWrong
+    Set-SyntheticProtectedAcl -Path $composeExpected
+    Set-SyntheticProtectedAcl -Path $composeWrong
+    $null = Assert-ThriveLensComposeDataDirectory -Path $composeExpected -ExpectedPath $composeExpected
+    Assert-Condition $true 'COMPOSE_EXACT_EMPTY_DIRECTORY_ACCEPTED'
+    Assert-ThrowsCode { Assert-ThriveLensComposeDataDirectory -Path $attributableRoot -ExpectedPath $composeExpected } `
+        'COMPOSE_DATA_ROOT_FORBIDDEN' 'COMPOSE_ROOT_REJECTED'
+    Assert-ThrowsCode { Assert-ThriveLensComposeDataDirectory -Path $composeWrong -ExpectedPath $composeExpected } `
+        'COMPOSE_DATA_DIRECTORY_MISMATCH' 'COMPOSE_WRONG_DIRECTORY_REJECTED'
+
+    $preseedPath = Join-Path $composeExpected 'PG_VERSION'
+    [IO.File]::WriteAllText($preseedPath, 'unverified')
+    Assert-ThrowsCode { Assert-ThriveLensComposeDataDirectory -Path $composeExpected -ExpectedPath $composeExpected } `
+        'COMPOSE_DATA_DIRECTORY_NOT_EMPTY' 'COMPOSE_PRESEEDED_DIRECTORY_REJECTED'
+    [IO.File]::Delete($preseedPath)
+
+    Add-SyntheticEveryoneRight -Path $composeExpected -Right W
+    Assert-ThrowsCode { Assert-ThriveLensComposeDataDirectory -Path $composeExpected -ExpectedPath $composeExpected } `
+        'DIRECTORY_ACL_ALLOWLIST_VIOLATION' 'COMPOSE_DIRECTORY_ACL_REJECTED'
+
+    $overlapSecret = Join-Path $composeExpected 'secret.txt'
+    [IO.File]::WriteAllText($overlapSecret, 'synthetic-test-only')
+    Assert-ThrowsCode { Assert-ThriveLensPathOutsideDirectory -DirectoryPath $composeExpected -OtherPath $overlapSecret } `
+        'COMPOSE_SECRET_DATA_OVERLAP' 'COMPOSE_SECRET_OVERLAP_REJECTED'
+    [IO.File]::Delete($overlapSecret)
+    $externalSecret = Join-Path $fixtureRoot 'external-secret.txt'
+    [IO.File]::WriteAllText($externalSecret, 'synthetic-test-only')
+    $null = Assert-ThriveLensPathOutsideDirectory -DirectoryPath $composeExpected -OtherPath $externalSecret
+    Assert-Condition $true 'COMPOSE_DISJOINT_SECRET_ACCEPTED'
+
+    $childFatal = Resolve-ThriveLensStartChildFailure `
+        -ExitCode 3 `
+        -OutputText '{"status":"ERROR","code":"POSTGRES_START_CLEANUP_FAILED"}'
+    Assert-Condition ($childFatal.Code -ceq 'POSTGRES_START_CLEANUP_FAILED' -and $childFatal.ExitCode -eq 3) `
+        'START_CHILD_CLEANUP_FATAL_PRESERVED'
+    $childUnknownFatal = Resolve-ThriveLensStartChildFailure -ExitCode 3 -OutputText 'malformed'
+    Assert-Condition ($childUnknownFatal.Code -ceq 'RUNTIME_START_CHILD_FATAL' -and $childUnknownFatal.ExitCode -eq 3) `
+        'START_CHILD_UNKNOWN_FATAL_PRESERVED'
+    $childOrdinary = Resolve-ThriveLensStartChildFailure -ExitCode 2 -OutputText 'blocked'
+    Assert-Condition ($childOrdinary.Code -ceq 'RUNTIME_START_PROBE_FAILED' -and $childOrdinary.ExitCode -eq 2) `
+        'START_CHILD_ORDINARY_FAILURE_CLASSIFIED'
+
+    $fatalCleanupOk = Resolve-ThriveLensRuntimeFailureOutcome `
+        -OriginalCode POSTGRES_START_CLEANUP_FAILED -OriginalExitCode 3 `
+        -StartInvoked $true -CleanupAttempted $true -CleanupExitCode 0 -AbsenceVerified $true
+    Assert-Condition (
+        $fatalCleanupOk.Code -ceq 'POSTGRES_START_CLEANUP_FAILED' -and
+        $fatalCleanupOk.ExitCode -eq 3 -and $fatalCleanupOk.CleanupVerified
+    ) 'START_FATAL_NOT_DOWNGRADED_AFTER_CLEANUP'
+    $fatalCleanupBad = Resolve-ThriveLensRuntimeFailureOutcome `
+        -OriginalCode POSTGRES_START_CLEANUP_FAILED -OriginalExitCode 3 `
+        -StartInvoked $true -CleanupAttempted $true -CleanupExitCode 2 -AbsenceVerified $false
+    Assert-Condition (
+        $fatalCleanupBad.Code -ceq 'POSTGRES_START_CLEANUP_FAILED' -and
+        $fatalCleanupBad.ExitCode -eq 3 -and -not $fatalCleanupBad.CleanupVerified
+    ) 'START_FATAL_NOT_DOWNGRADED_WHEN_CLEANUP_FAILS'
+    $ordinaryCleanupOk = Resolve-ThriveLensRuntimeFailureOutcome `
+        -OriginalCode RUNTIME_START_PROBE_FAILED -OriginalExitCode 2 `
+        -StartInvoked $true -CleanupAttempted $true -CleanupExitCode 0 -AbsenceVerified $true
+    Assert-Condition ($ordinaryCleanupOk.ExitCode -eq 2 -and $ordinaryCleanupOk.CleanupVerified) `
+        'NONZERO_START_REQUIRES_VERIFIED_CLEANUP'
+    $ordinaryCleanupMissing = Resolve-ThriveLensRuntimeFailureOutcome `
+        -OriginalCode RUNTIME_START_PROBE_FAILED -OriginalExitCode 2 `
+        -StartInvoked $true -CleanupAttempted $false -CleanupExitCode 0 -AbsenceVerified $false
+    Assert-Condition (
+        $ordinaryCleanupMissing.Code -ceq 'RUNTIME_CLEANUP_FAILED' -and
+        $ordinaryCleanupMissing.ExitCode -eq 3
+    ) 'MISSING_START_CLEANUP_ESCALATES'
 
     if ($failures.Count -gt 0) {
-        [pscustomobject]@{ schema_version = 1; status = 'FAIL'; codes = @($failures) } | ConvertTo-Json -Compress
-        exit 1
+        $preliminaryResponse = [pscustomobject]@{ schema_version = 1; status = 'FAIL'; codes = @($failures) }
+        $preliminaryExitCode = 1
     }
-    [pscustomobject]@{ schema_version = 1; status = 'PASS'; assertions = $assertionCount } | ConvertTo-Json -Compress
+    else {
+        $preliminaryResponse = [pscustomobject]@{ schema_version = 1; status = 'PASS'; assertions = $assertionCount }
+        $preliminaryExitCode = 0
+    }
 }
 catch {
-    [pscustomobject]@{ schema_version = 1; status = 'ERROR'; code = 'SECURITY_CONTROL_TEST_INTERNAL_ERROR' } | ConvertTo-Json -Compress
-    exit 2
+    $preliminaryResponse = [pscustomobject]@{ schema_version = 1; status = 'ERROR'; code = 'SECURITY_CONTROL_TEST_INTERNAL_ERROR' }
+    $preliminaryExitCode = 2
 }
 finally {
+    $cleanupSucceeded = $true
     if ($null -ne $fixtureRoot -and (Test-Path -LiteralPath $fixtureRoot)) {
         try {
             $validatedFixtureRoot = Assert-ThriveLensOwnedPath -Path $fixtureRoot
             Remove-Item -LiteralPath $validatedFixtureRoot -Recurse -Force
+            if (Test-Path -LiteralPath $validatedFixtureRoot) { throw 'FIXTURE_STILL_PRESENT' }
         }
-        catch { [Console]::Error.WriteLine('Synthetic security fixture cleanup failed closed.') }
+        catch { $cleanupSucceeded = $false }
     }
 }
+
+$finalOutcome = Resolve-SecurityFixtureOutcome `
+    -PreliminaryStatus ([string]$preliminaryResponse.status) `
+    -PreliminaryExitCode $preliminaryExitCode `
+    -CleanupSucceeded $cleanupSucceeded
+if (-not $cleanupSucceeded) {
+    $preliminaryResponse = [pscustomobject]@{
+        schema_version = 1
+        status = [string]$finalOutcome.Status
+        code = [string]$finalOutcome.Code
+    }
+}
+$preliminaryResponse | ConvertTo-Json -Compress
+if ([int]$finalOutcome.ExitCode -ne 0) { exit ([int]$finalOutcome.ExitCode) }

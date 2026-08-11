@@ -247,79 +247,63 @@ function Measure-ThriveLensSafeTree {
     return [pscustomobject]@{ Bytes = $bytes; Entries = $entries }
 }
 
-function Assert-ThriveLensPostgresArchive {
+function Assert-ThriveLensComposeDataDirectory {
     param(
-        [Parameter(Mandatory)][string]$ArchivePath,
-        [Parameter(Mandatory)][string]$DestinationRoot,
-        [Parameter(Mandatory)][int]$MaximumEntries,
-        [Parameter(Mandatory)][int64]$MaximumUncompressedBytes
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ExpectedPath
     )
-    if ($MaximumEntries -le 0 -or $MaximumUncompressedBytes -lt 0) {
-        throw 'ARCHIVE_LIMIT_INVALID'
+    $root = Get-ThriveLensAttributableRoot
+    $candidate = Assert-ThriveLensOwnedPath -Path $Path -AllowMissing
+    $expected = Assert-ThriveLensOwnedPath -Path $ExpectedPath -AllowMissing
+    if ($candidate -ieq $root) { throw 'COMPOSE_DATA_ROOT_FORBIDDEN' }
+    if ($candidate -ine $expected) { throw 'COMPOSE_DATA_DIRECTORY_MISMATCH' }
+    if (-not (Test-Path -LiteralPath $candidate -PathType Container)) {
+        throw 'COMPOSE_DATA_DIRECTORY_UNAVAILABLE'
     }
-    $archive = Assert-ThriveLensOwnedPath -Path $ArchivePath
-    $destination = Assert-ThriveLensOwnedPath -Path $DestinationRoot -AllowMissing
-    Add-Type -AssemblyName System.IO.Compression
-    $stream = [IO.File]::Open($archive, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-    try {
-        $zip = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Read, $false)
-        try {
-            if ($zip.Entries.Count -le 0 -or $zip.Entries.Count -gt $MaximumEntries) {
-                throw 'ARCHIVE_ENTRY_LIMIT_EXCEEDED'
-            }
-            $sum = [int64]0
-            $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-            foreach ($entry in $zip.Entries) {
-                $name = [string]$entry.FullName
-                $normalized = $name.Replace('\', '/')
-                if ([string]::IsNullOrWhiteSpace($normalized) -or $normalized -match '[\x00-\x1f]' -or
-                    $normalized.StartsWith('/') -or $normalized.StartsWith('//') -or
-                    $normalized -match ':' -or $normalized.Contains('//')) {
-                    throw 'ARCHIVE_PATH_REJECTED'
-                }
-                $trimmed = $normalized.TrimEnd('/')
-                $segments = @($trimmed.Split('/'))
-                if ($segments.Count -eq 0 -or
-                    @($segments | Where-Object {
-                        [string]::IsNullOrWhiteSpace($_) -or $_ -in @('.', '..') -or
-                        $_.EndsWith('.') -or $_.EndsWith(' ') -or
-                        $_ -match '["<>|*?]' -or
-                        $_ -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$'
-                    }).Count -gt 0) {
-                    throw 'ARCHIVE_PATH_REJECTED'
-                }
-                if ($trimmed -cne 'pgsql' -and -not $trimmed.StartsWith('pgsql/', [StringComparison]::Ordinal)) {
-                    throw 'ARCHIVE_LAYOUT_REJECTED'
-                }
-                if (-not $seen.Add($trimmed)) {
-                    throw 'ARCHIVE_DUPLICATE_PATH_REJECTED'
-                }
-                $candidate = [IO.Path]::GetFullPath((Join-Path $destination ($normalized.Replace('/', '\'))))
-                $destinationPrefix = $destination.TrimEnd('\') + '\'
-                if ($candidate.TrimEnd('\') -ine $destination.TrimEnd('\') -and
-                    -not $candidate.StartsWith($destinationPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                    throw 'ARCHIVE_CONTAINMENT_REJECTED'
-                }
-                $external = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$entry.ExternalAttributes), 0)
-                $unixType = ($external -shr 16) -band 0xF000
-                $dosAttributes = $external -band 0xFFFF
-                if (($dosAttributes -band [uint32][IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                    $unixType -notin @(0, 0x4000, 0x8000)) {
-                    throw 'ARCHIVE_LINK_OR_SPECIAL_ENTRY_REJECTED'
-                }
-                if ([int64]$entry.Length -gt ([int64]::MaxValue - $sum)) {
-                    throw 'ARCHIVE_SIZE_OVERFLOW'
-                }
-                $sum += [int64]$entry.Length
-                if ($sum -gt $MaximumUncompressedBytes) {
-                    throw 'ARCHIVE_UNCOMPRESSED_SIZE_EXCEEDED'
-                }
-            }
-            return [pscustomobject]@{ Entries = $zip.Entries.Count; UncompressedBytes = $sum }
+
+    $acl = Get-Acl -LiteralPath $candidate
+    if (-not $acl.AreAccessRulesProtected) { throw 'DIRECTORY_ACL_INHERITANCE_ENABLED' }
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $allowedSids = @($currentSid, 'S-1-5-18', 'S-1-5-32-544')
+    $ownerSid = $acl.Owner
+    try { $ownerSid = ([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value }
+    catch {
+        try { $ownerSid = ([Security.Principal.SecurityIdentifier]$acl.Owner).Value }
+        catch { throw 'DIRECTORY_ACL_OWNER_UNVERIFIABLE' }
+    }
+    if ($allowedSids -notcontains $ownerSid) { throw 'DIRECTORY_ACL_OWNER_REJECTED' }
+
+    $currentUserCanModify = $false
+    $modifyMask = [Security.AccessControl.FileSystemRights]::Modify
+    foreach ($rule in $acl.Access) {
+        if ($rule.IsInherited) { throw 'DIRECTORY_ACL_INHERITED_RULE_REJECTED' }
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+        try { $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }
+        catch { throw 'DIRECTORY_ACL_IDENTITY_UNVERIFIABLE' }
+        if ($allowedSids -notcontains $sid) { throw 'DIRECTORY_ACL_ALLOWLIST_VIOLATION' }
+        if ($sid -ceq $currentSid -and ($rule.FileSystemRights -band $modifyMask) -eq $modifyMask) {
+            $currentUserCanModify = $true
         }
-        finally { $zip.Dispose() }
     }
-    finally { $stream.Dispose() }
+    if (-not $currentUserCanModify) { throw 'DIRECTORY_ACL_CURRENT_USER_MODIFY_MISSING' }
+    if (@(Get-ChildItem -LiteralPath $candidate -Force).Count -ne 0) {
+        throw 'COMPOSE_DATA_DIRECTORY_NOT_EMPTY'
+    }
+    return $candidate
+}
+
+function Assert-ThriveLensPathOutsideDirectory {
+    param(
+        [Parameter(Mandatory)][string]$DirectoryPath,
+        [Parameter(Mandatory)][string]$OtherPath
+    )
+    $directory = Assert-ThriveLensOwnedPath -Path $DirectoryPath -AllowMissing
+    $other = Assert-ThriveLensOwnedPath -Path $OtherPath -AllowMissing
+    $prefix = $directory.TrimEnd('\') + '\'
+    if ($other -ieq $directory -or $other.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'COMPOSE_SECRET_DATA_OVERLAP'
+    }
+    return $other
 }
 
 function Assert-ThriveLensSecretFileAcl {
@@ -345,12 +329,16 @@ function Assert-ThriveLensSecretFileAcl {
     $currentUserCanRead = $false
     foreach ($rule in $acl.Access) {
         if ($rule.IsInherited) { throw 'SECRET_ACL_INHERITED_RULE_REJECTED' }
-        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
-            ($rule.FileSystemRights -band $readMask) -eq 0) { continue }
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
         try { $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }
         catch { throw 'SECRET_ACL_IDENTITY_UNVERIFIABLE' }
-        if ($allowedSids -notcontains $sid) { throw 'SECRET_ACL_READ_ALLOWLIST_VIOLATION' }
-        if ($sid -ceq $currentSid) { $currentUserCanRead = $true }
+        # A write-only or control-only ACE can replace, delete, or weaken the
+        # secret without reading it. Therefore every effective Allow ACE, not
+        # merely read-capable ACEs, is restricted to the explicit allowlist.
+        if ($allowedSids -notcontains $sid) { throw 'SECRET_ACL_ALLOWLIST_VIOLATION' }
+        if ($sid -ceq $currentSid -and ($rule.FileSystemRights -band $readMask) -ne 0) {
+            $currentUserCanRead = $true
+        }
     }
     if (-not $currentUserCanRead) { throw 'SECRET_ACL_CURRENT_USER_READ_MISSING' }
     try {
@@ -358,6 +346,62 @@ function Assert-ThriveLensSecretFileAcl {
         $probe.Dispose()
     }
     catch { throw 'SECRET_ACL_CURRENT_USER_READ_UNAVAILABLE' }
+}
+
+function Resolve-ThriveLensStartChildFailure {
+    param(
+        [Parameter(Mandatory)][int]$ExitCode,
+        [AllowEmptyString()][string]$OutputText = ''
+    )
+    if ($ExitCode -eq 0) {
+        return [pscustomobject]@{ Code = $null; ExitCode = 0 }
+    }
+    if ($ExitCode -eq 3) {
+        $code = if ($OutputText -match '"code"\s*:\s*"POSTGRES_START_CLEANUP_FAILED"') {
+            'POSTGRES_START_CLEANUP_FAILED'
+        }
+        else { 'RUNTIME_START_CHILD_FATAL' }
+        return [pscustomobject]@{ Code = $code; ExitCode = 3 }
+    }
+    return [pscustomobject]@{ Code = 'RUNTIME_START_PROBE_FAILED'; ExitCode = 2 }
+}
+
+function Resolve-ThriveLensRuntimeFailureOutcome {
+    param(
+        [Parameter(Mandatory)][string]$OriginalCode,
+        [Parameter(Mandatory)][ValidateSet(2, 3)][int]$OriginalExitCode,
+        [Parameter(Mandatory)][bool]$StartInvoked,
+        [Parameter(Mandatory)][bool]$CleanupAttempted,
+        [Parameter(Mandatory)][int]$CleanupExitCode,
+        [Parameter(Mandatory)][bool]$AbsenceVerified
+    )
+    if ([string]::IsNullOrWhiteSpace($OriginalCode)) {
+        throw 'RUNTIME_FAILURE_POLICY_INPUT_INVALID'
+    }
+    $cleanupRequired = $StartInvoked
+    $cleanupVerified = -not $cleanupRequired -or
+        ($CleanupAttempted -and $CleanupExitCode -eq 0 -and $AbsenceVerified)
+
+    if (-not $cleanupVerified) {
+        # Preserve a child cleanup fatal exactly; otherwise cleanup uncertainty
+        # escalates an ordinary probe failure to exit 3.
+        $code = if ($OriginalExitCode -eq 3) { $OriginalCode } else { 'RUNTIME_CLEANUP_FAILED' }
+        return [pscustomobject]@{
+            Status = 'ERROR'
+            Code = $code
+            ExitCode = 3
+            CleanupRequired = $cleanupRequired
+            CleanupVerified = $false
+        }
+    }
+
+    return [pscustomobject]@{
+        Status = if ($OriginalExitCode -eq 3) { 'ERROR' } else { 'BLOCKED' }
+        Code = $OriginalCode
+        ExitCode = $OriginalExitCode
+        CleanupRequired = $cleanupRequired
+        CleanupVerified = $cleanupVerified
+    }
 }
 
 function Assert-ThriveLensVersionText {
@@ -467,8 +511,11 @@ Export-ModuleMember -Function @(
     'Assert-ThriveLensFreeDiskBudget',
     'Invoke-ThriveLensResourceGate',
     'Measure-ThriveLensSafeTree',
-    'Assert-ThriveLensPostgresArchive',
+    'Assert-ThriveLensComposeDataDirectory',
+    'Assert-ThriveLensPathOutsideDirectory',
     'Assert-ThriveLensSecretFileAcl',
+    'Resolve-ThriveLensStartChildFailure',
+    'Resolve-ThriveLensRuntimeFailureOutcome',
     'Assert-ThriveLensVersionText',
     'Assert-ThriveLensPostgresVersions',
     'Test-ThriveLensPostgresRunning',

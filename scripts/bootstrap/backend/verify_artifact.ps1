@@ -14,13 +14,11 @@ $ErrorActionPreference = 'Stop'
 $modulePath = Join-Path $PSScriptRoot '..\..\dev\postgres\Runtime.psm1'
 
 try {
-    Import-Module -Name $modulePath -Force
-    $manifest = Get-ThriveLensManifest
-    if ($Kind -eq 'PostgreSQL' -and
-        ([string]$manifest.postgresql.portable_status -ceq 'REJECTED_FOR_RUNTIME' -or
-        -not [bool]$manifest.postgresql.windows_portable_install_enabled)) {
+    if ($Kind -eq 'PostgreSQL') {
         throw 'POSTGRES_WINDOWS_ARTIFACT_REJECTED'
     }
+    Import-Module -Name $modulePath -Force
+    $manifest = Get-ThriveLensManifest
     $artifactPath = Assert-ThriveLensOwnedPath -Path $Path
     if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
         throw 'ARTIFACT_UNAVAILABLE'

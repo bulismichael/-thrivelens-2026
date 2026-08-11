@@ -17,18 +17,33 @@ try {
     $manifest = Get-ThriveLensManifest
     $blockers = [Collections.Generic.List[string]]::new()
 
+    $projectionAvailable = $true
     $projectedAdditionalBytes = switch ($Action) {
         'Install' {
             switch ($InstallKind) {
-                'Python' { [int64]$manifest.resource_policy.python_worst_case_additional_bytes }
+                'Python' {
+                    if ($null -eq $manifest.resource_policy.python_worst_case_additional_bytes) {
+                        $projectionAvailable = $false
+                        $null
+                    }
+                    else { [int64]$manifest.resource_policy.python_worst_case_additional_bytes }
+                }
                 'PostgreSQL' { [int64]$manifest.resource_policy.postgresql_worst_case_additional_bytes }
-                default { [int64]$manifest.resource_policy.worst_case_backend_additional_bytes }
+                default {
+                    if ($null -eq $manifest.resource_policy.worst_case_backend_additional_bytes) {
+                        $projectionAvailable = $false
+                        $null
+                    }
+                    else { [int64]$manifest.resource_policy.worst_case_backend_additional_bytes }
+                }
             }
         }
         'Initialize' { [int64]$manifest.resource_policy.postgresql_initialization_worst_case_additional_bytes }
         default { [int64]0 }
     }
-    try { $null = Invoke-ThriveLensResourceGate -ProjectedAdditionalBytes $projectedAdditionalBytes }
+    if (-not $projectionAvailable) { $blockers.Add('INSTALL_PROJECTION_UNAVAILABLE') }
+    $gateProjectedAdditionalBytes = if ($projectionAvailable) { [int64]$projectedAdditionalBytes } else { [int64]0 }
+    try { $null = Invoke-ThriveLensResourceGate -ProjectedAdditionalBytes $gateProjectedAdditionalBytes }
     catch {
         if ($_.Exception.Message -in @(
             'PROJECTED_RESOURCE_CAP_EXCEEDED',
@@ -64,6 +79,10 @@ try {
         -not [bool]$manifest.postgresql.windows_portable_install_enabled) {
         $blockers.Add('WINDOWS_POSTGRES_INSTALL_DISABLED')
         $blockers.Add('WSL_FALLBACK_REQUIRED_NOT_ACTIVATED')
+    }
+    if ($Action -eq 'Install' -and $InstallKind -in @('Backend', 'Python') -and
+        -not [bool]$manifest.python.install_enabled) {
+        $blockers.Add('PYTHON_INSTALL_DISABLED_UNMEASURED_SCRATCH_CACHE')
     }
 
     if ($Action -in @('Initialize', 'Runtime')) {

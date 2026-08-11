@@ -6,7 +6,8 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $modulePath = Join-Path $PSScriptRoot 'Runtime.psm1'
-$startedHere = $false
+$startInvoked = $false
+$failureExitCode = 2
 
 try {
     Import-Module -Name $modulePath -Force
@@ -20,13 +21,20 @@ try {
     }
     Assert-ThriveLensPostgresAbsent
 
+    # A child can start PostgreSQL and then fail while reporting a nonzero exit.
+    # From this point onward every failure path must independently stop/prove
+    # absence; the child process's cleanup claim is never trusted by itself.
+    $startInvoked = $true
     $startOutput = @(& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'start.ps1') 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        $startOutput = $null
-        throw 'RUNTIME_START_PROBE_FAILED'
-    }
+    $startExitCode = $LASTEXITCODE
+    $startFailure = Resolve-ThriveLensStartChildFailure `
+        -ExitCode $startExitCode `
+        -OutputText ($startOutput -join [Environment]::NewLine)
     $startOutput = $null
-    $startedHere = $true
+    if ($startExitCode -ne 0) {
+        $failureExitCode = [int]$startFailure.ExitCode
+        throw [string]$startFailure.Code
+    }
 
     $paths = Get-ThriveLensPostgresPaths
     $readinessOutput = @(& $paths.PgIsReady '-h' '127.0.0.1' '-p' ([string]$paths.Port) '-t' '5' '-q' 2>&1)
@@ -47,7 +55,7 @@ try {
     }
     $stopOutput = $null
     Assert-ThriveLensPostgresAbsent
-    $startedHere = $false
+    $startInvoked = $false
 
     [pscustomobject]@{
         schema_version = 1
@@ -60,30 +68,17 @@ try {
     } | ConvertTo-Json -Compress
 }
 catch {
-    $originalCode = $_.Exception.Message
-    $cleanupFailed = $false
-    if ($startedHere) {
-        $cleanupExitCode = 0
-        try {
-            $cleanupOutput = @(& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'stop.ps1') 2>&1)
-            $cleanupExitCode = $LASTEXITCODE
-            $cleanupOutput = $null
-            Assert-ThriveLensPostgresAbsent
-            $startedHere = $false
-        }
-        catch { $cleanupFailed = $true }
-        if ($cleanupExitCode -ne 0) { $cleanupFailed = $true }
-    }
-    if ($cleanupFailed) {
-        [pscustomobject]@{ schema_version = 1; status = 'ERROR'; code = 'RUNTIME_CLEANUP_FAILED' } | ConvertTo-Json -Compress
-        exit 3
-    }
-
+    $rawOriginalCode = $_.Exception.Message
     $allowed = @(
         'RUNTIME_TEST_REQUIRES_STOPPED_CLUSTER',
         'RUNTIME_START_PROBE_FAILED',
+        'POSTGRES_START_CLEANUP_FAILED',
+        'RUNTIME_START_CHILD_FATAL',
         'RUNTIME_READINESS_PROBE_FAILED',
         'RUNTIME_STOP_PROBE_FAILED',
+        'POSTGRES_CLUSTER_STILL_RUNNING',
+        'POSTGRES_PROCESS_STILL_PRESENT',
+        'POSTGRES_LISTENER_STILL_PRESENT',
         'POSTGRES_LISTENER_UNAVAILABLE',
         'POSTGRES_NON_LOOPBACK_LISTENER',
         'POSTGRES_LISTENER_MEASUREMENT_UNAVAILABLE',
@@ -92,7 +87,44 @@ catch {
         'POSTGRES_VERSION_EXECUTION_FAILED',
         'POSTGRES_VERSION_EXECUTABLE_UNAVAILABLE'
     )
-    $code = if ($allowed -contains $originalCode) { $originalCode } else { 'RUNTIME_TEST_INTERNAL_ERROR' }
-    [pscustomobject]@{ schema_version = 1; status = 'BLOCKED'; code = $code } | ConvertTo-Json -Compress
-    exit 2
+    $originalCode = if ($allowed -contains $rawOriginalCode) { $rawOriginalCode } else { 'RUNTIME_TEST_INTERNAL_ERROR' }
+
+    $cleanupAttempted = $false
+    $cleanupExitCode = 0
+    $absenceVerified = $false
+    if ($startInvoked) {
+        $cleanupAttempted = $true
+        $cleanupExitCode = -1
+        $cleanupOutput = @()
+        try {
+            $cleanupOutput = @(& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'stop.ps1') 2>&1)
+            $cleanupExitCode = $LASTEXITCODE
+        }
+        catch { $cleanupExitCode = -1 }
+        finally { $cleanupOutput = $null }
+
+        # This probe runs even when the independent stop command returns
+        # nonzero or throws, so a surviving process/listener cannot be hidden.
+        try {
+            Assert-ThriveLensPostgresAbsent
+            $absenceVerified = $true
+        }
+        catch { $absenceVerified = $false }
+    }
+
+    $outcome = Resolve-ThriveLensRuntimeFailureOutcome `
+        -OriginalCode $originalCode `
+        -OriginalExitCode $failureExitCode `
+        -StartInvoked $startInvoked `
+        -CleanupAttempted $cleanupAttempted `
+        -CleanupExitCode $cleanupExitCode `
+        -AbsenceVerified $absenceVerified
+    [pscustomobject]@{
+        schema_version = 1
+        status = [string]$outcome.Status
+        code = [string]$outcome.Code
+        cleanup_required = [bool]$outcome.CleanupRequired
+        cleanup_verified = [bool]$outcome.CleanupVerified
+    } | ConvertTo-Json -Compress
+    exit ([int]$outcome.ExitCode)
 }

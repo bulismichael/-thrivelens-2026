@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$DataDirectory = $env:TL_POSTGRES_COMPOSE_DATA_DIR,
+    [string]$DataDirectory,
     [string]$PasswordFile = $env:TL_POSTGRES_ADMIN_PASSWORD_FILE
 )
 
@@ -14,6 +14,9 @@ try {
     Import-Module -Name $modulePath -Force
     $manifest = Get-ThriveLensManifest
     $blockers = [Collections.Generic.List[string]]::new()
+    if ([string]::IsNullOrWhiteSpace($DataDirectory)) {
+        $DataDirectory = [Environment]::ExpandEnvironmentVariables([string]$manifest.compose.data_root)
+    }
 
     if ([bool]$manifest.compose.enabled_by_default -or
         [string]$manifest.compose.required_profile -cne 'postgres-explicit') {
@@ -49,36 +52,32 @@ try {
     }
     catch { $blockers.Add('MEMORY_MEASUREMENT_UNAVAILABLE') }
 
-    if ([string]::IsNullOrWhiteSpace($DataDirectory)) {
-        $blockers.Add('COMPOSE_DATA_DIRECTORY_REQUIRED')
-    }
-    else {
+    if (-not [string]::IsNullOrWhiteSpace($DataDirectory)) {
         try {
-            $dataPath = Assert-ThriveLensOwnedPath -Path $DataDirectory -AllowMissing
-            if (-not (Test-Path -LiteralPath $dataPath -PathType Container)) {
-                $blockers.Add('COMPOSE_DATA_DIRECTORY_UNAVAILABLE')
-            }
-            else {
-                $null = Measure-ThriveLensSafeTree `
-                    -Root $dataPath `
-                    -MaximumBytes ([int64]$manifest.compose.maximum_data_bytes) `
-                    -MaximumEntries ([int]$manifest.postgresql.maximum_archive_entries)
-            }
+            $dataPath = Assert-ThriveLensComposeDataDirectory `
+                -Path $DataDirectory `
+                -ExpectedPath ([string]$manifest.compose.data_root)
         }
         catch {
             if ($_.Exception.Message -in @(
                 'PATH_OUTSIDE_ATTRIBUTABLE_ROOT',
                 'REPARSE_PATH_REJECTED',
-                'SAFE_TREE_ROOT_INVALID',
-                'SAFE_TREE_LIMIT_INVALID',
-                'SAFE_TREE_ENTRY_LIMIT_EXCEEDED',
-                'SAFE_TREE_REPARSE_REJECTED',
-                'SAFE_TREE_SIZE_OVERFLOW',
-                'SAFE_TREE_SIZE_EXCEEDED'
+                'COMPOSE_DATA_ROOT_FORBIDDEN',
+                'COMPOSE_DATA_DIRECTORY_MISMATCH',
+                'COMPOSE_DATA_DIRECTORY_UNAVAILABLE',
+                'COMPOSE_DATA_DIRECTORY_NOT_EMPTY',
+                'DIRECTORY_ACL_INHERITANCE_ENABLED',
+                'DIRECTORY_ACL_INHERITED_RULE_REJECTED',
+                'DIRECTORY_ACL_OWNER_UNVERIFIABLE',
+                'DIRECTORY_ACL_OWNER_REJECTED',
+                'DIRECTORY_ACL_IDENTITY_UNVERIFIABLE',
+                'DIRECTORY_ACL_ALLOWLIST_VIOLATION',
+                'DIRECTORY_ACL_CURRENT_USER_MODIFY_MISSING'
             )) { $blockers.Add($_.Exception.Message) }
             else { $blockers.Add('COMPOSE_DATA_POLICY_FAILED') }
         }
     }
+    else { $blockers.Add('COMPOSE_DATA_DIRECTORY_REQUIRED') }
 
     if ([string]::IsNullOrWhiteSpace($PasswordFile)) {
         $blockers.Add('COMPOSE_PASSWORD_FILE_REQUIRED')
@@ -86,6 +85,9 @@ try {
     else {
         try {
             $secretPath = Assert-ThriveLensOwnedPath -Path $PasswordFile -AllowMissing
+            $null = Assert-ThriveLensPathOutsideDirectory `
+                -DirectoryPath ([string]$manifest.compose.data_root) `
+                -OtherPath $secretPath
             if (-not (Test-Path -LiteralPath $secretPath -PathType Leaf)) {
                 $blockers.Add('COMPOSE_PASSWORD_FILE_UNAVAILABLE')
             }
@@ -95,6 +97,7 @@ try {
             if ($_.Exception.Message -in @(
                 'PATH_OUTSIDE_ATTRIBUTABLE_ROOT',
                 'REPARSE_PATH_REJECTED',
+                'COMPOSE_SECRET_DATA_OVERLAP',
                 'SECRET_FILE_UNAVAILABLE',
                 'SECRET_ACL_WINDOWS_REQUIRED',
                 'SECRET_ACL_INHERITANCE_ENABLED',
@@ -102,7 +105,7 @@ try {
                 'SECRET_ACL_OWNER_UNVERIFIABLE',
                 'SECRET_ACL_OWNER_REJECTED',
                 'SECRET_ACL_IDENTITY_UNVERIFIABLE',
-                'SECRET_ACL_READ_ALLOWLIST_VIOLATION',
+                'SECRET_ACL_ALLOWLIST_VIOLATION',
                 'SECRET_ACL_CURRENT_USER_READ_MISSING',
                 'SECRET_ACL_CURRENT_USER_READ_UNAVAILABLE'
             )) { $blockers.Add($_.Exception.Message) }
