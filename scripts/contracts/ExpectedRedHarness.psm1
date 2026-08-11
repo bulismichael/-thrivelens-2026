@@ -2,6 +2,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:RepositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+$script:MaximumCombinedOutputBytes = 65536
+$script:OutputReadChunkBytes = 4096
+$script:PostKillDrainMilliseconds = 500
+$script:PostExitDrainMilliseconds = 1000
 $script:EntryKeys = @(
     'argv',
     'expected_missing_behavior_marker',
@@ -128,8 +132,28 @@ function Read-ExpectedRedManifest {
     }
 }
 
+function Add-BoundedOutputChunk {
+    param(
+        [Parameter(Mandatory)] [System.IO.MemoryStream] $Destination,
+        [Parameter(Mandatory)] [byte[]] $Buffer,
+        [Parameter(Mandatory)] [int] $Count,
+        [Parameter(Mandatory)] [ref] $CombinedCount
+    )
+
+    $remaining = $script:MaximumCombinedOutputBytes - [int]$CombinedCount.Value
+    $accepted = [Math]::Min([Math]::Max($remaining, 0), $Count)
+    if ($accepted -gt 0) {
+        $Destination.Write($Buffer, 0, $accepted)
+        $CombinedCount.Value = [int]$CombinedCount.Value + $accepted
+    }
+    return ($accepted -eq $Count)
+}
+
 function Invoke-BoundedProcess {
-    param([Parameter(Mandatory)] [System.Collections.IDictionary] $Entry)
+    param(
+        [Parameter(Mandatory)] [System.Collections.IDictionary] $Entry,
+        [scriptblock] $TerminationHook
+    )
 
     $argv = @($Entry.argv)
     $info = [System.Diagnostics.ProcessStartInfo]::new()
@@ -146,31 +170,181 @@ function Invoke-BoundedProcess {
     $process.StartInfo = $info
     try {
         if (-not $process.Start()) {
-            return [pscustomobject]@{ Started = $false; TimedOut = $false; ExitCode = $null; Output = '' }
+            $process.Dispose()
+            return [pscustomobject]@{
+                Started = $false; TimedOut = $false; OutputLimitExceeded = $false
+                KillFailed = $false; DrainIncomplete = $false; ReadFailed = $false
+                ExitCode = $null; Output = ''
+            }
         }
     }
     catch {
-        return [pscustomobject]@{ Started = $false; TimedOut = $false; ExitCode = $null; Output = '' }
+        $process.Dispose()
+        return [pscustomobject]@{
+            Started = $false; TimedOut = $false; OutputLimitExceeded = $false
+            KillFailed = $false; DrainIncomplete = $false; ReadFailed = $false
+            ExitCode = $null; Output = ''
+        }
     }
 
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
-    $completed = $process.WaitForExit([int]$Entry.timeout_seconds * 1000)
-    if (-not $completed) {
-        try { $process.Kill($true) } catch { }
-        try { $process.WaitForExit(2000) | Out-Null } catch { }
+    $stdoutStream = $process.StandardOutput.BaseStream
+    $stderrStream = $process.StandardError.BaseStream
+    $stdoutBytes = [System.IO.MemoryStream]::new()
+    $stderrBytes = [System.IO.MemoryStream]::new()
+    $stdoutBuffer = [byte[]]::new($script:OutputReadChunkBytes)
+    $stderrBuffer = [byte[]]::new($script:OutputReadChunkBytes)
+    $stdoutTask = $stdoutStream.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+    $stderrTask = $stderrStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
+    $stdoutEof = $false
+    $stderrEof = $false
+    $combinedCount = 0
+    $timedOut = $false
+    $outputLimitExceeded = $false
+    $killFailed = $false
+    $drainIncomplete = $false
+    $readFailed = $false
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $postExitStartedAt = -1L
+    $processExited = $false
+
+    while ($true) {
+        $madeProgress = $false
+        if (-not $stdoutEof -and $null -ne $stdoutTask -and $stdoutTask.IsCompleted) {
+            try { $read = $stdoutTask.GetAwaiter().GetResult() } catch { $read = 0; $readFailed = $true }
+            $stdoutTask = $null
+            if ($read -le 0) {
+                $stdoutEof = $true
+            }
+            else {
+                if (-not (Add-BoundedOutputChunk -Destination $stdoutBytes -Buffer $stdoutBuffer -Count $read -CombinedCount ([ref]$combinedCount))) {
+                    $outputLimitExceeded = $true
+                }
+                if (-not $outputLimitExceeded) {
+                    $stdoutTask = $stdoutStream.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+                }
+            }
+            $madeProgress = $true
+        }
+        if (-not $stderrEof -and $null -ne $stderrTask -and $stderrTask.IsCompleted) {
+            try { $read = $stderrTask.GetAwaiter().GetResult() } catch { $read = 0; $readFailed = $true }
+            $stderrTask = $null
+            if ($read -le 0) {
+                $stderrEof = $true
+            }
+            else {
+                if (-not (Add-BoundedOutputChunk -Destination $stderrBytes -Buffer $stderrBuffer -Count $read -CombinedCount ([ref]$combinedCount))) {
+                    $outputLimitExceeded = $true
+                }
+                if (-not $outputLimitExceeded) {
+                    $stderrTask = $stderrStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
+                }
+            }
+            $madeProgress = $true
+        }
+
+        try { $processExited = $process.HasExited } catch { $processExited = $false }
+        if ($outputLimitExceeded -or $readFailed) {
+            break
+        }
+        if (-not $processExited -and $stopwatch.ElapsedMilliseconds -ge ([int]$Entry.timeout_seconds * 1000)) {
+            $timedOut = $true
+            break
+        }
+        if ($processExited -and $stdoutEof -and $stderrEof) {
+            break
+        }
+        if ($processExited) {
+            if ($postExitStartedAt -lt 0) {
+                $postExitStartedAt = $stopwatch.ElapsedMilliseconds
+            }
+            elseif (($stopwatch.ElapsedMilliseconds - $postExitStartedAt) -ge $script:PostExitDrainMilliseconds) {
+                $drainIncomplete = $true
+                break
+            }
+        }
+        if (-not $madeProgress) {
+            [System.Threading.Thread]::Sleep(5)
+        }
     }
-    $stdout = $stdoutTask.GetAwaiter().GetResult()
-    $stderr = $stderrTask.GetAwaiter().GetResult()
+
+    $terminationRequired = $timedOut -or $outputLimitExceeded -or ($readFailed -and -not $processExited)
+    if ($terminationRequired) {
+        try {
+            if ($null -ne $TerminationHook) {
+                & $TerminationHook $process
+            }
+            else {
+                $process.Kill($true)
+            }
+        }
+        catch {
+            $killFailed = $true
+        }
+        try {
+            if (-not $process.WaitForExit(500)) {
+                $killFailed = $true
+            }
+        }
+        catch {
+            $killFailed = $true
+        }
+
+        $drainDeadline = $stopwatch.ElapsedMilliseconds + $script:PostKillDrainMilliseconds
+        while (($stopwatch.ElapsedMilliseconds -lt $drainDeadline) -and (-not $stdoutEof -or -not $stderrEof)) {
+            $madeProgress = $false
+            if (-not $stdoutEof) {
+                if ($null -eq $stdoutTask) {
+                    try { $stdoutTask = $stdoutStream.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length) } catch { $stdoutEof = $true }
+                }
+                elseif ($stdoutTask.IsCompleted) {
+                    try { $read = $stdoutTask.GetAwaiter().GetResult() } catch { $read = 0; $readFailed = $true }
+                    $stdoutTask = $null
+                    if ($read -le 0) { $stdoutEof = $true }
+                    $madeProgress = $true
+                }
+            }
+            if (-not $stderrEof) {
+                if ($null -eq $stderrTask) {
+                    try { $stderrTask = $stderrStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length) } catch { $stderrEof = $true }
+                }
+                elseif ($stderrTask.IsCompleted) {
+                    try { $read = $stderrTask.GetAwaiter().GetResult() } catch { $read = 0; $readFailed = $true }
+                    $stderrTask = $null
+                    if ($read -le 0) { $stderrEof = $true }
+                    $madeProgress = $true
+                }
+            }
+            if (-not $madeProgress) {
+                [System.Threading.Thread]::Sleep(5)
+            }
+        }
+        if (-not $stdoutEof -or -not $stderrEof) {
+            $drainIncomplete = $true
+        }
+    }
+
+    $exitCode = $null
+    try {
+        if ($process.HasExited) { $exitCode = $process.ExitCode }
+    }
+    catch { }
+    $stdout = [System.Text.Encoding]::UTF8.GetString($stdoutBytes.ToArray())
+    $stderr = [System.Text.Encoding]::UTF8.GetString($stderrBytes.ToArray())
     $combined = ($stdout + "`n" + $stderr).Replace($script:RepositoryRoot, '<repository>')
-    if ($combined.Length -gt 65536) {
-        $combined = $combined.Substring($combined.Length - 65536)
-    }
-    $exitCode = if ($completed) { $process.ExitCode } else { $null }
+
+    try { $stdoutStream.Dispose() } catch { }
+    try { $stderrStream.Dispose() } catch { }
+    $stdoutBytes.Dispose()
+    $stderrBytes.Dispose()
     $process.Dispose()
+    $stopwatch.Stop()
     return [pscustomobject]@{
         Started = $true
-        TimedOut = -not $completed
+        TimedOut = $timedOut
+        OutputLimitExceeded = $outputLimitExceeded
+        KillFailed = $killFailed
+        DrainIncomplete = $drainIncomplete
+        ReadFailed = $readFailed
         ExitCode = $exitCode
         Output = $combined
     }
@@ -206,18 +380,33 @@ function Assert-NoToolOrCrashFailure {
 
 function Invoke-ExpectedRedEntries {
     [CmdletBinding()]
-    param([Parameter(Mandatory)] [System.Collections.IDictionary[]] $Entries)
+    param(
+        [Parameter(Mandatory)] [System.Collections.IDictionary[]] $Entries,
+        [scriptblock] $TerminationHook
+    )
 
     $count = 0
     $failures = [System.Collections.Generic.List[string]]::new()
     foreach ($entry in $Entries) {
         try {
-            $result = Invoke-BoundedProcess -Entry $entry
+            $result = Invoke-BoundedProcess -Entry $entry -TerminationHook $TerminationHook
             if (-not $result.Started) {
                 throw "Expected-red entry executable could not start: $($entry.id)."
             }
             if ($result.TimedOut) {
                 throw "Expected-red entry timed out: $($entry.id)."
+            }
+            if ($result.OutputLimitExceeded) {
+                throw "Expected-red entry exceeded the bounded output limit: $($entry.id)."
+            }
+            if ($result.KillFailed) {
+                throw "Expected-red entry could not be terminated safely: $($entry.id)."
+            }
+            if ($result.DrainIncomplete) {
+                throw "Expected-red entry output did not close within the bounded drain: $($entry.id)."
+            }
+            if ($result.ReadFailed) {
+                throw "Expected-red entry output could not be read safely: $($entry.id)."
             }
             if ($result.ExitCode -eq 0) {
                 throw "Expected-red entry unexpectedly passed: $($entry.id)."
@@ -252,7 +441,8 @@ function Invoke-ExpectedGreenEntries {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [System.Collections.IDictionary[]] $Entries,
-        [Parameter(Mandatory)] [string] $Owner
+        [Parameter(Mandatory)] [string] $Owner,
+        [scriptblock] $TerminationHook
     )
 
     if ($Owner -notmatch '^TL-R0-[0-9]{3}$') {
@@ -266,12 +456,24 @@ function Invoke-ExpectedGreenEntries {
     $failures = [System.Collections.Generic.List[string]]::new()
     foreach ($entry in $selected) {
         try {
-            $result = Invoke-BoundedProcess -Entry $entry
+            $result = Invoke-BoundedProcess -Entry $entry -TerminationHook $TerminationHook
             if (-not $result.Started) {
                 throw "Expected-green entry executable could not start: $($entry.id)."
             }
             if ($result.TimedOut) {
                 throw "Expected-green entry timed out: $($entry.id)."
+            }
+            if ($result.OutputLimitExceeded) {
+                throw "Expected-green entry exceeded the bounded output limit: $($entry.id)."
+            }
+            if ($result.KillFailed) {
+                throw "Expected-green entry could not be terminated safely: $($entry.id)."
+            }
+            if ($result.DrainIncomplete) {
+                throw "Expected-green entry output did not close within the bounded drain: $($entry.id)."
+            }
+            if ($result.ReadFailed) {
+                throw "Expected-green entry output could not be read safely: $($entry.id)."
             }
             Assert-CollectedOnce -Entry $entry -Output $result.Output
             Assert-NoToolOrCrashFailure -Entry $entry -Output $result.Output

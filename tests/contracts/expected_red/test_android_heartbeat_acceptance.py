@@ -14,7 +14,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from scripts.contracts.r0_transport import load_policy, validate_policy
+from scripts.contracts.r0_transport import load_policy, scan_packaged_inputs, validate_policy
 
 
 ANDROID_ROOT = REPOSITORY_ROOT / "apps" / "mobile" / "android"
@@ -69,7 +69,7 @@ class AndroidHeartbeatAcceptanceTests(unittest.TestCase):
             environment["THRIVELENS_FAKE_ADB_LOG"] = str(log)
             environment["THRIVELENS_FAKE_PROBE_LOG"] = str(probe_log)
 
-            def run(probe: Path) -> subprocess.CompletedProcess[str]:
+            def run(probe: Path, serial: str = "fixture-device") -> subprocess.CompletedProcess[str]:
                 return subprocess.run(
                     [
                         "pwsh",
@@ -77,7 +77,7 @@ class AndroidHeartbeatAcceptanceTests(unittest.TestCase):
                         "-File",
                         str(VERIFY_WRAPPER),
                         "-DeviceSerial",
-                        "fixture-device",
+                        serial,
                         "-AdbPath",
                         str(adb),
                         "-HeartbeatProbePath",
@@ -138,29 +138,25 @@ class AndroidHeartbeatAcceptanceTests(unittest.TestCase):
             self.assertFalse(probe_log.exists())
             log.unlink()
             environment.pop("THRIVELENS_FAKE_ADB_FAIL_REVERSE")
-            missing_serial = subprocess.run(
-                [
-                    "pwsh",
-                    "-NoProfile",
-                    "-File",
-                    str(VERIFY_WRAPPER),
-                    "-DeviceSerial",
-                    "",
-                    "-AdbPath",
-                    str(adb),
-                    "-HeartbeatProbePath",
-                    str(probe_ok),
-                ],
-                cwd=REPOSITORY_ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
-            self.assertNotEqual(missing_serial.returncode, 0)
-            self.assertFalse(log.exists())
-            self.assertFalse(probe_log.exists())
+            for unsafe_serial in (
+                "",
+                "-e",
+                "--help",
+                "-serial",
+                "serial;TL_CANARY",
+                "serial|TL_CANARY",
+                "serial\nTL_CANARY",
+                " leading",
+            ):
+                with self.subTest(unsafe_serial=repr(unsafe_serial)):
+                    if log.exists():
+                        log.unlink()
+                    if probe_log.exists():
+                        probe_log.unlink()
+                    rejected = run(probe_ok, unsafe_serial)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(log.exists(), "unsafe serial reached adb")
+                    self.assertFalse(probe_log.exists(), "unsafe serial reached the heartbeat probe")
 
     def test_debug_cleartext_is_loopback_scoped(self) -> None:
         marker = "THRIVELENS_MISSING_IMPLEMENTATION::TL-R0-008-DEBUG-MANIFEST-BOUNDARY"
@@ -211,20 +207,18 @@ class AndroidHeartbeatAcceptanceTests(unittest.TestCase):
         application = _application(RELEASE_MANIFEST)
         self.assertEqual(application.get(ANDROID_NS + "usesCleartextTraffic"), "false")
         self.assertIsNone(application.get(ANDROID_NS + "networkSecurityConfig"))
-        release_tree = "\n".join(
-            path.read_text(encoding="utf-8", errors="strict")
-            for source_set in (
-                ANDROID_ROOT / "app" / "src" / "main",
-                ANDROID_ROOT / "app" / "src" / "release",
-                MOBILE_ROOT / "lib",
-                MOBILE_ROOT / "assets",
-            )
-            for path in source_set.rglob("*")
-            if path.is_file()
-            and path.suffix.lower() in {".xml", ".gradle", ".kts", ".properties", ".json", ".dart"}
-        ).lower() + "\n" + (MOBILE_ROOT / "pubspec.yaml").read_text(encoding="utf-8").lower()
-        self.assertNotIn("http://127.0.0.1:8000/api/v1", release_tree)
-        self.assertNotIn("usescleartexttraffic=\"true\"", release_tree)
+        packaged_sources = [
+            ANDROID_ROOT / "app" / "src" / "main",
+            ANDROID_ROOT / "app" / "src" / "release",
+            MOBILE_ROOT / "lib",
+            MOBILE_ROOT / "pubspec.yaml",
+        ]
+        assets = MOBILE_ROOT / "assets"
+        if assets.exists():
+            packaged_sources.append(assets)
+        packaged_scan = scan_packaged_inputs(packaged_sources)
+        self.assertGreater(packaged_scan["files"], 0)
+        self.assertGreater(packaged_scan["bytes"], 0)
         safe_environment = os.environ.copy()
         safe_environment.pop("THRIVELENS_API_BASE_URL", None)
         safe_environment.pop("THRIVELENS_PRODUCTION_ENABLED", None)

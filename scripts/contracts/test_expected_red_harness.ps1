@@ -87,6 +87,18 @@ if mode != "no_collection":
         if mode == "timeout":
             time.sleep(3)
             return
+        if mode == "over_cap":
+            sys.stdout.buffer.write(b"X" * 40000)
+            sys.stdout.buffer.flush()
+            sys.stderr.buffer.write(b"Y" * 40000)
+            sys.stderr.buffer.flush()
+            time.sleep(3)
+            self.fail(marker)
+        if mode == "kill_failure":
+            with open(sys.argv[4], "w", encoding="ascii") as handle:
+                handle.write(str(__import__("os").getpid()))
+            time.sleep(10)
+            return
         if mode == "import_error":
             __import__("thrivelens_fixture_module_that_does_not_exist")
         if mode == "spoof":
@@ -150,6 +162,58 @@ unittest.main(argv=[sys.argv[0]], verbosity=2)
 
     $timeout = New-FixtureEntry -Id 'TL-R0-900-TIMEOUT' -Owner 'TL-R0-900' -Mode 'timeout' -ClassName 'TimeoutCase' -Timeout 1
     Assert-Fails { Invoke-ExpectedRedEntries -Entries @($timeout) } 'timeout cleanup'
+
+    $overCap = New-FixtureEntry -Id 'TL-R0-900-OUTPUT-CAP' -Owner 'TL-R0-900' -Mode 'over_cap' -ClassName 'OutputCapCase' -Timeout 5
+    $overCapStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    Assert-Fails { Invoke-ExpectedRedEntries -Entries @($overCap) } 'strict combined output byte cap'
+    $overCapStopwatch.Stop()
+    if ($overCapStopwatch.ElapsedMilliseconds -ge 5000) {
+        throw 'Output-cap rejection did not terminate within the bounded deadline.'
+    }
+
+    $killFailurePidPath = Join-Path $temporaryRoot 'kill-failure-child.pid'
+    $killFailure = New-FixtureEntry -Id 'TL-R0-900-KILL-FAILURE' -Owner 'TL-R0-900' -Mode 'kill_failure' -ClassName 'KillFailureCase' -Timeout 1 -ExtraArguments @($killFailurePidPath)
+    $killFailureHook = { throw 'simulated process-tree termination failure before termination' }
+    $killFailureStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $killFailureChild = $null
+    try {
+        Assert-Fails {
+            Invoke-ExpectedRedEntries -Entries @($killFailure) -TerminationHook $killFailureHook
+        } 'termination failure fails closed without awaiting pending output reads'
+        $killFailureStopwatch.Stop()
+        if ($killFailureStopwatch.ElapsedMilliseconds -ge 5000) {
+            throw 'Termination-failure rejection exceeded the bounded deadline.'
+        }
+        if (-not (Test-Path -LiteralPath $killFailurePidPath)) {
+            throw 'Termination-failure fixture did not publish its child process ID.'
+        }
+        $killFailurePid = [int](Get-Content -LiteralPath $killFailurePidPath -Raw)
+        $killFailureChild = [System.Diagnostics.Process]::GetProcessById($killFailurePid)
+        if ($killFailureChild.HasExited) {
+            throw 'Termination-failure fixture exited before explicit self-test cleanup.'
+        }
+    }
+    finally {
+        $killFailureStopwatch.Stop()
+        if ($null -eq $killFailureChild -and (Test-Path -LiteralPath $killFailurePidPath)) {
+            try {
+                $killFailurePid = [int](Get-Content -LiteralPath $killFailurePidPath -Raw)
+                $killFailureChild = [System.Diagnostics.Process]::GetProcessById($killFailurePid)
+            }
+            catch { }
+        }
+        if ($null -ne $killFailureChild) {
+            try {
+                if (-not $killFailureChild.HasExited) {
+                    $killFailureChild.Kill($true)
+                    [void]$killFailureChild.WaitForExit(2000)
+                }
+            }
+            finally {
+                $killFailureChild.Dispose()
+            }
+        }
+    }
 
     $quoted = New-FixtureEntry -Id 'TL-R0-900-ARGV-QUOTING' -Owner 'TL-R0-900' -Mode 'injection' -ClassName 'QuotedCase' -ExtraArguments @('value with spaces & | ; $()')
     Assert-Passes { Invoke-ExpectedGreenEntries -Entries @($quoted) -Owner 'TL-R0-900' } 'argument-array quoting without shell evaluation'
