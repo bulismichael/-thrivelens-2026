@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -16,6 +17,76 @@ EXPECTED_EFFECTIVE_ROUTES = {
     "/api/v1/health/ready": ("getHealthReady", {"200", "400", "403", "500", "503"}),
     "/api/v1/system/status": ("getSystemStatus", {"200", "400", "403", "500"}),
     "/api/v1/system/version": ("getSystemVersion", {"200", "400", "403", "500"}),
+}
+
+EXPECTED_ROOT_KEYS = {"openapi", "info", "servers", "security", "paths", "components"}
+EXPECTED_OPENAPI_CANONICAL_SHA256 = "9145a2ca54f2a113107038b74fa2abbf071f829fba664af8e2b4586e415fb30e"
+EXPECTED_INFO = {
+    "title": "ThriveLens R0 heartbeat API",
+    "version": "0.1.0",
+    "description": (
+        "Anonymous, read-only, loopback-only development heartbeat. "
+        "R0 production startup is disabled."
+    ),
+}
+EXPECTED_COMPONENT_KEYS = {"parameters", "headers", "responses", "schemas"}
+EXPECTED_COMPONENT_NAMES = {
+    "parameters": {"CorrelationIdRequest"},
+    "headers": {"CacheControlNoStore", "CorrelationId"},
+    "responses": {"InternalError", "RequestRejected"},
+    "schemas": {
+        "LivenessResponse",
+        "ReadinessReadyResponse",
+        "ReadinessUnavailableResponse",
+        "ReadinessNotReadyResponse",
+        "ReadinessUnknownResponse",
+        "DatabaseNotReadyError",
+        "DatabaseUnknownError",
+        "InternalErrorResponse",
+        "InternalError",
+        "RequestRejectedResponse",
+        "RequestRejectedError",
+        "CorrelationId",
+        "SystemStatusResponse",
+        "SystemAvailableResponse",
+        "SystemDatabaseNotReadyResponse",
+        "SystemDatabaseUnknownResponse",
+        "ReadyComponents",
+        "NotReadyComponents",
+        "UnknownComponents",
+        "UtcTimestamp",
+        "SystemVersionResponse",
+    },
+}
+EXPECTED_SCHEMA_PROPERTIES = {
+    "LivenessResponse": {"status"},
+    "ReadinessReadyResponse": {"status", "database"},
+    "ReadinessNotReadyResponse": {"status", "database", "error"},
+    "ReadinessUnknownResponse": {"status", "database", "error"},
+    "DatabaseNotReadyError": {"code", "message", "correlation_id"},
+    "DatabaseUnknownError": {"code", "message", "correlation_id"},
+    "InternalErrorResponse": {"error"},
+    "InternalError": {"code", "message", "correlation_id"},
+    "RequestRejectedResponse": {"error"},
+    "RequestRejectedError": {"code", "message", "correlation_id"},
+    "SystemAvailableResponse": {"status", "components", "checked_at"},
+    "SystemDatabaseNotReadyResponse": {"status", "components", "checked_at"},
+    "SystemDatabaseUnknownResponse": {"status", "components", "checked_at"},
+    "ReadyComponents": {"app_service", "database"},
+    "NotReadyComponents": {"app_service", "database"},
+    "UnknownComponents": {"app_service", "database"},
+    "SystemVersionResponse": {"api_version", "service_version"},
+}
+EXPECTED_ONE_OF_REFS = {
+    "ReadinessUnavailableResponse": [
+        "#/components/schemas/ReadinessNotReadyResponse",
+        "#/components/schemas/ReadinessUnknownResponse",
+    ],
+    "SystemStatusResponse": [
+        "#/components/schemas/SystemAvailableResponse",
+        "#/components/schemas/SystemDatabaseNotReadyResponse",
+        "#/components/schemas/SystemDatabaseUnknownResponse",
+    ],
 }
 
 EXPECTED_RESPONSE_SCHEMAS = {
@@ -131,6 +202,16 @@ class ContractValidationError(ValueError):
     """Raised when a frozen contract violates a deterministic invariant."""
 
 
+def _require_exact_keys(value: Any, expected: set[str], pointer: str) -> None:
+    if not isinstance(value, dict) or set(value) != expected:
+        raise ContractValidationError(f"object keys differ from the frozen allowlist at {pointer}")
+
+
+def _require_bounded_description(value: Any, pointer: str) -> None:
+    if not isinstance(value, str) or not value or len(value) > 300:
+        raise ContractValidationError(f"description must be a bounded non-empty string at {pointer}")
+
+
 def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -220,11 +301,40 @@ def _resolved_header(document: dict[str, Any], header: dict[str, Any]) -> dict[s
     return resolved
 
 
+def _validate_header_object(document: dict[str, Any], header: dict[str, Any], pointer: str) -> None:
+    resolved = _resolved_header(document, header)
+    _require_exact_keys(resolved, {"description", "schema"}, pointer)
+    _require_bounded_description(resolved["description"], f"{pointer}/description")
+    _validate_schema_definition(document, resolved["schema"], f"{pointer}/schema", set())
+
+
+def _validate_response_object(document: dict[str, Any], response: dict[str, Any], pointer: str) -> None:
+    resolved = _resolved_response(document, response)
+    _require_exact_keys(resolved, {"description", "headers", "content"}, pointer)
+    _require_bounded_description(resolved["description"], f"{pointer}/description")
+    headers = resolved["headers"]
+    _require_exact_keys(headers, {"Cache-Control", "X-Correlation-ID"}, f"{pointer}/headers")
+    for name, header in headers.items():
+        if not isinstance(header, dict):
+            raise ContractValidationError(f"header must be an object at {pointer}/headers/{name}")
+        _validate_header_object(document, header, f"{pointer}/headers/{name}")
+    content = resolved["content"]
+    _require_exact_keys(content, {"application/json"}, f"{pointer}/content")
+    media_type = content["application/json"]
+    _require_exact_keys(media_type, {"schema"}, f"{pointer}/content/application~1json")
+    schema = media_type["schema"]
+    _require_exact_keys(schema, {"$ref"}, f"{pointer}/content/application~1json/schema")
+    resolve_local_ref(document, schema["$ref"])
+
+
 def validate_openapi(document: dict[str, Any]) -> None:
     if not isinstance(document, dict):
         raise ContractValidationError("OpenAPI root must be an object")
+    _require_exact_keys(document, EXPECTED_ROOT_KEYS, "$")
     if document.get("openapi") != "3.0.3":
         raise ContractValidationError("OpenAPI version must be exactly 3.0.3")
+    if document.get("info") != EXPECTED_INFO:
+        raise ContractValidationError("OpenAPI info must remain the exact frozen object")
     if document.get("security") != []:
         raise ContractValidationError("R0 top-level security must be explicitly anonymous")
     if document.get("servers") != [
@@ -247,6 +357,12 @@ def validate_openapi(document: dict[str, Any]) -> None:
         operation = path_item["get"]
         if not isinstance(operation, dict):
             raise ContractValidationError(f"GET {path} must be an object")
+        _require_exact_keys(
+            operation,
+            {"operationId", "summary", "security", "parameters", "responses"},
+            f"$/paths/{path}/get",
+        )
+        _require_bounded_description(operation["summary"], f"$/paths/{path}/get/summary")
         if operation.get("security") != []:
             raise ContractValidationError(f"GET {path} must be explicitly anonymous")
         forbidden = {"requestBody", "callbacks", "webhooks"} & set(operation)
@@ -276,6 +392,7 @@ def validate_openapi(document: dict[str, Any]) -> None:
             if not isinstance(raw_response, dict):
                 raise ContractValidationError(f"response {status} for {path} must be an object")
             response = _resolved_response(document, raw_response)
+            _validate_response_object(document, raw_response, f"$/paths/{path}/get/responses/{status}")
             headers = response.get("headers")
             if not isinstance(headers, dict) or set(headers) != {
                 "Cache-Control",
@@ -317,6 +434,16 @@ def validate_openapi(document: dict[str, Any]) -> None:
     }:
         raise ContractValidationError("the optional request correlation parameter must remain exact")
 
+    components = document.get("components")
+    _require_exact_keys(components, EXPECTED_COMPONENT_KEYS, "$/components")
+    for category, expected_names in EXPECTED_COMPONENT_NAMES.items():
+        category_value = components[category]
+        _require_exact_keys(category_value, expected_names, f"$/components/{category}")
+    for name, header in components["headers"].items():
+        _validate_header_object(document, header, f"$/components/headers/{name}")
+    for name, response in components["responses"].items():
+        _validate_response_object(document, response, f"$/components/responses/{name}")
+
     for pointer, node in _iter_nodes(document):
         if not isinstance(node, dict):
             continue
@@ -334,6 +461,23 @@ def validate_openapi(document: dict[str, Any]) -> None:
         raise ContractValidationError("components.schemas must be a non-empty object")
     for name, schema in schemas.items():
         _validate_schema_definition(document, schema, f"#/components/schemas/{name}", set())
+        expected_properties = EXPECTED_SCHEMA_PROPERTIES.get(name)
+        if expected_properties is not None and set(schema.get("properties", {})) != expected_properties:
+            raise ContractValidationError(f"schema properties differ from the frozen contract: {name}")
+        expected_refs = EXPECTED_ONE_OF_REFS.get(name)
+        if expected_refs is not None:
+            actual_refs = [branch.get("$ref") for branch in schema.get("oneOf", [])]
+            if actual_refs != expected_refs:
+                raise ContractValidationError(f"oneOf branches differ from the frozen contract: {name}")
+
+    canonical_bytes = json.dumps(
+        document,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    if hashlib.sha256(canonical_bytes).hexdigest() != EXPECTED_OPENAPI_CANONICAL_SHA256:
+        raise ContractValidationError("OpenAPI values differ from the frozen canonical fingerprint")
 
 
 def _validate_schema_definition(
@@ -349,6 +493,33 @@ def _validate_schema_definition(
             raise ContractValidationError(f"cyclic schema reference is forbidden at {pointer}: {ref}")
         _validate_schema_definition(document, resolve_local_ref(document, ref), ref, resolving | {ref})
         return
+
+    if "oneOf" in schema:
+        _require_exact_keys(schema, {"oneOf"}, pointer)
+    elif schema.get("type") == "object":
+        _require_exact_keys(
+            schema,
+            {"type", "additionalProperties", "required", "properties"},
+            pointer,
+        )
+    elif schema.get("type") == "string":
+        allowed_string_keys = {"type", "enum", "pattern", "minLength", "maxLength", "format"}
+        unknown_string_keys = set(schema) - allowed_string_keys
+        if unknown_string_keys:
+            raise ContractValidationError(f"string schema has unknown keys at {pointer}")
+        if "enum" in schema:
+            enum = schema["enum"]
+            if not isinstance(enum, list) or not enum or any(not isinstance(item, str) for item in enum):
+                raise ContractValidationError(f"string enum must be a non-empty string list at {pointer}")
+        if "pattern" in schema and not isinstance(schema["pattern"], str):
+            raise ContractValidationError(f"schema pattern must be a string at {pointer}")
+        for bound in ("minLength", "maxLength"):
+            if bound in schema and (not isinstance(schema[bound], int) or isinstance(schema[bound], bool)):
+                raise ContractValidationError(f"schema {bound} must be an integer at {pointer}")
+        if "format" in schema and schema["format"] != "date-time":
+            raise ContractValidationError(f"only the intended date-time format is allowed at {pointer}")
+    else:
+        raise ContractValidationError(f"unsupported or missing schema type at {pointer}")
 
     object_keywords = {"properties", "required", "additionalProperties"} & set(schema)
     if schema.get("type") == "object" or object_keywords:
