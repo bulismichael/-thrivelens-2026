@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,7 +16,13 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from scripts.contracts.r0_transport import load_policy, scan_packaged_inputs, validate_policy
+from scripts.contracts.r0_transport import (
+    inspect_release_apk_bytes,
+    load_policy,
+    load_release_policy_from_apk,
+    scan_packaged_inputs,
+    validate_policy,
+)
 
 
 ANDROID_ROOT = REPOSITORY_ROOT / "apps" / "mobile" / "android"
@@ -28,6 +36,9 @@ DEBUG_NETWORK_CONFIG = (
 RELEASE_MANIFEST = ANDROID_ROOT / "app" / "src" / "release" / "AndroidManifest.xml"
 ANDROID_BUILD_CONFIG = ANDROID_ROOT / "app" / "build.gradle.kts"
 ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
+INVOCATION_MODULE = REPOSITORY_ROOT / "scripts" / "contracts" / "R0AndroidInvocation.psm1"
+MOBILE_TOOLCHAIN = REPOSITORY_ROOT / "config" / "toolchains" / "mobile.json"
+RELEASE_APK = MOBILE_ROOT / "build" / "app" / "outputs" / "flutter-apk" / "app-release.apk"
 
 
 def _application(path: Path) -> ET.Element:
@@ -38,33 +49,113 @@ def _application(path: Path) -> ET.Element:
     return application
 
 
+def _build_fake_android_tools(root: Path) -> tuple[Path, Path, Path]:
+    source = root / "fixture-tool.py"
+    source.write_text(
+        '''
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+role = Path(sys.argv[0]).stem.lower()
+arguments = sys.argv[1:]
+if role.startswith("fake-adb"):
+    with open(os.environ["THRIVELENS_FAKE_ADB_LOG"], "a", encoding="utf-8") as handle:
+        handle.write(" ".join(arguments) + "\\n")
+    if (
+        os.environ.get("THRIVELENS_FAKE_ADB_FAIL_REVERSE") == "1"
+        and len(arguments) >= 4
+        and arguments[2:4] == ["reverse", "tcp:8000"]
+    ):
+        raise SystemExit(9)
+    raise SystemExit(0)
+with open(os.environ["THRIVELENS_FAKE_PROBE_LOG"], "a", encoding="utf-8") as handle:
+    handle.write(" ".join(arguments) + "\\n")
+raise SystemExit(7 if role.startswith("probe-fail") else 0)
+'''.strip(),
+        encoding="utf-8",
+    )
+    adb = root / "fake-adb.py"
+    probe_ok = root / "probe-ok.py"
+    probe_fail = root / "probe-fail.py"
+    for target in (adb, probe_ok, probe_fail):
+        shutil.copyfile(source, target)
+    return adb, probe_ok, probe_fail
+
+
+def _pinned_aapt2_path(marker: str) -> Path:
+    if not MOBILE_TOOLCHAIN.is_file():
+        raise AssertionError(marker)
+    try:
+        manifest = json.loads(MOBILE_TOOLCHAIN.read_text(encoding="utf-8"))
+        aapt2 = manifest["android"]["aapt2"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        raise AssertionError(marker) from None
+    if not isinstance(aapt2, dict) or set(aapt2) != {"path", "sha256", "version"}:
+        raise AssertionError("pinned aapt2 record must be a closed object")
+    if not isinstance(aapt2["version"], str) or re.fullmatch(
+        r"[0-9]+(?:\.[0-9]+){1,3}", aapt2["version"]
+    ) is None:
+        raise AssertionError("pinned aapt2 version is invalid")
+    if not isinstance(aapt2["sha256"], str) or re.fullmatch(
+        r"[0-9a-f]{64}", aapt2["sha256"]
+    ) is None:
+        raise AssertionError("pinned aapt2 digest is invalid")
+    if not isinstance(aapt2["path"], str) or not aapt2["path"]:
+        raise AssertionError("pinned aapt2 path is invalid")
+    analyzer = Path(os.path.expandvars(aapt2["path"]))
+    if not analyzer.is_absolute():
+        analyzer = REPOSITORY_ROOT / analyzer
+    if not analyzer.is_file():
+        raise AssertionError(marker)
+    digest = hashlib.sha256()
+    with analyzer.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != aapt2["sha256"]:
+        raise AssertionError("installed aapt2 digest differs from its pin")
+    return analyzer
+
+
+def _run_pinned_analyzer(analyzer: Path, arguments: list[str]) -> str:
+    result = subprocess.run(
+        [str(analyzer), *arguments],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    if len(result.stdout) + len(result.stderr) > 2 * 1024 * 1024:
+        raise AssertionError("pinned Android analyzer exceeded its output limit")
+    if result.returncode != 0:
+        raise AssertionError("pinned Android analyzer rejected the release artifact")
+    return result.stdout.decode("utf-8", errors="strict")
+
+
 class AndroidHeartbeatAcceptanceTests(unittest.TestCase):
     def test_selected_device_reverse_and_failure_cleanup(self) -> None:
         marker = "THRIVELENS_MISSING_IMPLEMENTATION::TL-R0-008-ADB-REVERSE-LIFECYCLE"
         if not VERIFY_WRAPPER.is_file():
             self.fail(marker)
+        wrapper_source = VERIFY_WRAPPER.read_text(encoding="utf-8")
+        self.assertIn("R0AndroidInvocation.psm1", wrapper_source)
+        self.assertEqual(wrapper_source.count("Invoke-R0AndroidVerification"), 1)
+        for forbidden_wrapper_primitive in (
+            "Start-Process",
+            "ProcessStartInfo",
+            "UseShellExecute",
+            "ArgumentList",
+            "ProcessInvoker",
+            "&",
+        ):
+            self.assertNotIn(forbidden_wrapper_primitive, wrapper_source)
         with tempfile.TemporaryDirectory(prefix="thrivelens-r0-adb-") as temporary:
             root = Path(temporary)
-            adb = root / "fake-adb.cmd"
-            probe_ok = root / "probe-ok.cmd"
-            probe_fail = root / "probe-fail.cmd"
+            adb, probe_ok, probe_fail = _build_fake_android_tools(root)
             log = root / "adb.log"
             probe_log = root / "probe.log"
-            adb.write_text(
-                '@echo off\r\n'
-                'echo %*>>"%THRIVELENS_FAKE_ADB_LOG%"\r\n'
-                'if "%THRIVELENS_FAKE_ADB_FAIL_REVERSE%"=="1" if "%3"=="reverse" if "%4"=="tcp:8000" exit /b 9\r\n'
-                'exit /b 0\r\n',
-                encoding="utf-8",
-            )
-            probe_ok.write_text(
-                '@echo off\r\necho %*>>"%THRIVELENS_FAKE_PROBE_LOG%"\r\nexit /b 0\r\n',
-                encoding="utf-8",
-            )
-            probe_fail.write_text(
-                '@echo off\r\necho %*>>"%THRIVELENS_FAKE_PROBE_LOG%"\r\nexit /b 7\r\n',
-                encoding="utf-8",
-            )
             environment = os.environ.copy()
             environment["THRIVELENS_FAKE_ADB_LOG"] = str(log)
             environment["THRIVELENS_FAKE_PROBE_LOG"] = str(probe_log)
@@ -145,6 +236,15 @@ class AndroidHeartbeatAcceptanceTests(unittest.TestCase):
                 "-serial",
                 "serial;TL_CANARY",
                 "serial|TL_CANARY",
+                "serial&TL_CANARY",
+                "serial<TL_CANARY",
+                "serial>TL_CANARY",
+                'serial"TL_CANARY',
+                "serial'TL_CANARY",
+                "serial%TL_CANARY",
+                "serial`TL_CANARY",
+                "serial\tTL_CANARY",
+                "serial TL_CANARY",
                 "serial\nTL_CANARY",
                 " leading",
             ):
@@ -219,9 +319,43 @@ class AndroidHeartbeatAcceptanceTests(unittest.TestCase):
         packaged_scan = scan_packaged_inputs(packaged_sources)
         self.assertGreater(packaged_scan["files"], 0)
         self.assertGreater(packaged_scan["bytes"], 0)
+        if not RELEASE_APK.is_file():
+            self.fail(marker)
+        analyzer = _pinned_aapt2_path(marker)
+        inspect_release_apk_bytes(RELEASE_APK)
+        self.assertEqual(
+            load_release_policy_from_apk(RELEASE_APK),
+            {
+                "schema_version": 1,
+                "resolved_api_base_url": "",
+                "production_enabled": False,
+            },
+        )
+        manifest_dump = _run_pinned_analyzer(
+            analyzer,
+            ["dump", "xmltree", "--file", "AndroidManifest.xml", str(RELEASE_APK)],
+        ).lower()
+        cleartext_lines = [
+            line for line in manifest_dump.splitlines() if "usescleartexttraffic" in line
+        ]
+        self.assertEqual(len(cleartext_lines), 1)
+        self.assertRegex(cleartext_lines[0], r"(?:\(type 0x12\)0x0\b|=\s*false\b)")
+        self.assertNotIn("networksecurityconfig", manifest_dump)
+        resource_dump = _run_pinned_analyzer(
+            analyzer,
+            ["dump", "resources", str(RELEASE_APK)],
+        ).lower()
+        self.assertIsNone(re.search(r"network[_-]?security|security[_-]?config", resource_dump))
         safe_environment = os.environ.copy()
-        safe_environment.pop("THRIVELENS_API_BASE_URL", None)
-        safe_environment.pop("THRIVELENS_PRODUCTION_ENABLED", None)
+        for variable in (
+            "THRIVELENS_API_BASE_URL",
+            "THRIVELENS_API_BASE_SCHEME",
+            "THRIVELENS_API_BASE_HOST",
+            "THRIVELENS_API_BASE_PORT",
+            "THRIVELENS_API_BASE_PATH",
+            "THRIVELENS_PRODUCTION_ENABLED",
+        ):
+            safe_environment.pop(variable, None)
         policy_check = subprocess.run(
             [
                 "pwsh",
@@ -252,15 +386,28 @@ class AndroidHeartbeatAcceptanceTests(unittest.TestCase):
                 "production_enabled": False,
                 "cleartext_allowed": False,
                 "debug_base_url_allowed": False,
+                "resolved_api_base_url": "",
             },
         )
-        for variable, unsafe_value in (
-            ("THRIVELENS_API_BASE_URL", "http://127.0.0.1:8000/api/v1"),
-            ("THRIVELENS_PRODUCTION_ENABLED", "true"),
+        for label, unsafe_overrides in (
+            (
+                "direct debug base",
+                {"THRIVELENS_API_BASE_URL": "http://127.0.0.1:8000/api/v1"},
+            ),
+            ("production enabled", {"THRIVELENS_PRODUCTION_ENABLED": "true"}),
+            (
+                "split debug base",
+                {
+                    "THRIVELENS_API_BASE_SCHEME": "http",
+                    "THRIVELENS_API_BASE_HOST": "127.0.0.1",
+                    "THRIVELENS_API_BASE_PORT": "8000",
+                    "THRIVELENS_API_BASE_PATH": "/api/v1",
+                },
+            ),
         ):
-            with self.subTest(variable=variable):
+            with self.subTest(policy_negative=label):
                 unsafe_environment = safe_environment.copy()
-                unsafe_environment[variable] = unsafe_value
+                unsafe_environment.update(unsafe_overrides)
                 unsafe_check = subprocess.run(
                     [
                         "pwsh",
