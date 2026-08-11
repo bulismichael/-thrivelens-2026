@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
+    profiles: ["postgres-explicit"]
+    platform: linux/amd64
+    image: postgres:17.10-bookworm@sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923
     restart: "no"
     environment:
       POSTGRES_USER: ${TL_POSTGRES_ADMIN_USER:?Set TL_POSTGRES_ADMIN_USER}
@@ -12,7 +14,9 @@ services:
     ports:
       - "127.0.0.1:${TL_POSTGRES_PORT:-55432}:5432"
     volumes:
-      - thrivelens_postgres_r0:/var/lib/postgresql/data
+      - type: bind
+        source: ${TL_POSTGRES_COMPOSE_DATA_DIR:?Set TL_POSTGRES_COMPOSE_DATA_DIR}
+        target: /var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -q -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
@@ -26,6 +30,3 @@ services:
 secrets:
   postgres_admin_password:
     file: ${TL_POSTGRES_ADMIN_PASSWORD_FILE:?Set TL_POSTGRES_ADMIN_PASSWORD_FILE}
-
-volumes:
-  thrivelens_postgres_r0:

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "task_id": "TL-R0-003",
-  "status": "BLOCKED_RUNTIME_NOT_PROVISIONED",
+  "status": "BLOCKED_WSL_FALLBACK_REQUIRES_HUMAN_AUTHORITY",
   "target": {
     "os": "windows",
     "architecture": "x86_64",
@@ -12,7 +12,12 @@
     "install_minimum_free_memory_bytes": 2147483648,
     "runtime_minimum_free_memory_bytes": 1073741824,
     "aggregate_cap_bytes": 19327352832,
-    "hard_stop_percent": 85
+    "hard_stop_percent": 85,
+    "minimum_free_disk_reserve_bytes": 536870912,
+    "python_worst_case_additional_bytes": 297888400,
+    "postgresql_worst_case_additional_bytes": 1340560230,
+    "postgresql_initialization_worst_case_additional_bytes": 134217728,
+    "worst_case_backend_additional_bytes": 1638448630
   },
   "python": {
     "implementation": "CPython",
@@ -35,8 +40,10 @@
       "sigstore_bundle_url": "https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.exe.sigstore",
       "sigstore_signer_identity": "thomas@python.org",
       "sigstore_oidc_issuer": "https://accounts.google.com",
+      "sigstore_enforced": false,
       "authenticode_subject_contains": "Python Software Foundation",
-      "status": "PUBLISHER_ATTESTATION_AVAILABLE_NOT_LOCALLY_VERIFIED"
+      "enforced_methods": ["SHA-256", "Authenticode"],
+      "status": "SHA256_AND_AUTHENTICODE_ENFORCED_SIGSTORE_RECORDED_ONLY"
     },
     "install_policy": {
       "all_users": false,
@@ -65,6 +72,7 @@
     "maximum_initial_cluster_bytes": 134217728,
     "maximum_synthetic_backup_bytes": 67108864,
     "maximum_total_postgresql_bytes": 1006632960,
+    "maximum_archive_entries": 50000,
     "extracted_size_status": "PROJECTION_CEILING_NOT_MEASURED",
     "binary_root": "%LOCALAPPDATA%\\ThriveLens\\toolchains\\postgresql\\17.10-2\\pgsql",
     "data_root": "%LOCALAPPDATA%\\ThriveLens\\data\\postgresql\\r0",
@@ -80,17 +88,25 @@
       "http_etag": "\"79b5e842ce14c51627d6b8e3baa703a0-40\"",
       "limitation": "The EDB binaries page exposes the archive over HTTPS but publishes no archive SHA-256 or detached signature. Content-Length, Last-Modified, and the multipart ETag are metadata, not a cryptographic publisher attestation.",
       "required_executable_authenticode_subject_regex": "(?i)(EnterpriseDB|EDB)",
-      "status": "BLOCKED_PUBLISHER_ARCHIVE_ATTESTATION_UNAVAILABLE"
+      "status": "REJECTED_NO_PUBLISHER_ARCHIVE_ATTESTATION"
     },
-    "portable_status": "CANDIDATE_NOT_ACCEPTED_OR_INSTALLED",
+    "portable_status": "REJECTED_FOR_RUNTIME",
+    "windows_portable_install_enabled": false,
+    "windows_interactive_installer_status": "HARD_DISABLED",
+    "rejection": "The EDB ZIP has no publisher SHA-256 or detached signature. HTTPS metadata, a locally computed hash, and signatures on a subset of extracted executables cannot attest the full archive.",
     "rollback": "Stop only the dedicated cluster, confirm no process uses its data directory, then remove only the versioned binary/data/log directories after explicit authorization and rerun the aggregate resource gate."
   },
   "wsl_fallback": {
-    "trigger": "Activate only if the portable archive integrity limitation is not accepted by independent security review, executable signatures fail, extracted size exceeds its ceiling, or loopback start/stop cannot be proven.",
-    "status": "NOT_ACTIVATED_REQUIRES_RESOURCE_ACCOUNTING_AND_HUMAN_SYSTEM_CHANGE",
+    "trigger": "Required because the EDB portable Windows archive is rejected for runtime.",
+    "status": "REQUIRED_BUT_NOT_ACTIVATED",
+    "human_system_authority": "REQUIRED",
+    "package_integrity_policy": "Pin an exact supported PostgreSQL package version and verify distribution-signed repository metadata before installation.",
+    "storage_policy": "Create a dedicated ThriveLens WSL storage location and add it to aggregate accounting before package or cluster bytes are written.",
     "constraints": [
       "Do not invoke sudo or change the WSL distribution automatically.",
-      "Add and validate attributable WSL storage accounting before package installation or cluster creation.",
+      "Obtain explicit human authority for WSL system and package changes.",
+      "Verify signed package metadata and exact package pins before installation.",
+      "Add and validate dedicated attributable WSL storage accounting before package installation or cluster creation.",
       "Run the same loopback, SCRAM, start/stop, memory, and aggregate footprint gates."
     ]
   },
@@ -101,10 +117,25 @@
     "linux_amd64_manifest_digest": "sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923",
     "linux_amd64_compressed_layer_bytes": 156095657,
     "maximum_runtime_bytes": 536870912,
+    "maximum_data_bytes": 134217728,
+    "projected_additional_bytes": 827184297,
+    "enabled_by_default": false,
+    "required_profile": "postgres-explicit",
+    "platform": "linux/amd64",
+    "data_root_policy": "Bind storage must resolve beneath %LOCALAPPDATA%\\ThriveLens without any reparse component.",
+    "secret_acl_policy": "Inheritance disabled; read access only for the current user, LocalSystem, and BUILTIN Administrators.",
+    "engine_storage_accounting_status": "REQUIRED_NOT_CONFIGURED",
+    "engine_storage_accounting_policy": "Before activation, the integration owner must add the container engine image, layer, build-cache, and writable-layer storage to aggregate counted paths or run this contract on a disposable CI host with an independently enforced 18 GB cap.",
     "packaging_source": "https://github.com/docker-library/postgres",
     "packaging_license": "MIT for Docker packaging; contained distribution components retain their own licences",
     "contained_license_inventory_status": "PENDING_IMAGE_INSPECTION_NOT_PULLED",
     "digest_status": "REGISTRY_METADATA_PINNED_NOT_PULLED"
+  },
+  "data_inventory_gate": {
+    "required_before": "postgresql_initialization",
+    "status": "REQUIRED_NOT_SATISFIED",
+    "owned_document": "docs/privacy/DATA_INVENTORY.md",
+    "ownership_note": "The required inventory update is outside TL-R0-003 owned paths and must be completed by the integration owner before initialization."
   },
   "provenance_observed_at": "2026-08-12",
   "provisioning_status": "NO_ARTIFACT_DOWNLOADED_NO_LICENSE_ACCEPTED_NO_SERVICE_STARTED_NO_CREDENTIAL_CREATED"

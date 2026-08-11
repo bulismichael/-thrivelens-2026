@@ -4,9 +4,10 @@ ThriveLens is being delivered release-by-release. R0 is the foundation heartbeat
 
 ## Current platform status
 
-- CPython 3.13.15 is pinned to the Python Software Foundation's x86-64 installer with official SHA-256, Sigstore, and Authenticode verification requirements.
-- PostgreSQL 17.10-2 is pinned to the Windows x86-64 binaries ZIP linked from the official PostgreSQL Windows page. EDB does not publish a ZIP checksum or detached signature beside this artifact, so the portable candidate remains blocked and uninstalled.
-- The PostgreSQL-only Compose contract is a secondary option for compatible CI/developer hosts. Docker Desktop is not required or installed for R0.
+- CPython 3.13.15 is pinned to the Python Software Foundation's x86-64 installer. The local verifier enforces the official SHA-256 and PSF Authenticode signature. The upstream Sigstore bundle is recorded for provenance but is **not enforced** by these scripts.
+- The EDB PostgreSQL 17.10-2 Windows binaries ZIP is **rejected for runtime**, not merely awaiting a local checksum: EDB publishes no archive checksum or detached signature. The portable ZIP path and the interactive Windows installer path are both hard-disabled.
+- WSL PostgreSQL is therefore required but **not activated**. A human must authorize the system change, pin a distribution-signed exact package, and establish dedicated aggregate-counted WSL storage first.
+- The PostgreSQL-only Compose contract is a secondary, default-disabled option for compatible CI/developer hosts. Docker Desktop is not required or installed for R0, and engine storage accounting is not configured.
 - No artifact, service, cluster, credential, or licence acceptance is created by the repository scripts without an explicit later provisioning action.
 
 The authoritative details and primary-source links are in [the R0 platform note](docs/program/task-notes/r0/platform.md) and the machine-readable manifest at `config/toolchains/backend.json`.
@@ -28,20 +29,19 @@ These checks do not download artifacts, create credentials, start services, or i
 ```powershell
 pwsh -NoProfile -File scripts/bootstrap/backend/test_manifest.ps1
 pwsh -NoProfile -File scripts/dev/postgres/test_static.ps1
+pwsh -NoProfile -File scripts/dev/postgres/test_security_controls.ps1
 pwsh -NoProfile -File scripts/dev/postgres/preflight.ps1
 ```
 
-The first two should pass. The last command is expected to return `BLOCKED` until the resource phase, free memory, archive integrity, binaries, and cluster are all genuinely ready.
+The first three should pass. The last command is expected to return `BLOCKED` with the rejected-Windows-runtime and not-activated-WSL codes, plus any current resource/binary/cluster blockers. A missing runtime is never reported as PostgreSQL evidence.
 
-## Future PostgreSQL runtime sequence
+## Provisioning boundary
 
-Do not run this sequence until the integration and independent security reviewers disposition the EDB archive integrity limitation and the host passes preflight.
+There is no approved Windows PostgreSQL provisioning sequence. Do not download the EDB ZIP or use the interactive EDB installer for this task. The dormant ZIP installer code remains fail-closed and can only be reconsidered through a separate publisher-attestation and security review.
 
-1. Place reviewed artifacts under `%LOCALAPPDATA%\ThriveLens\downloads`; scripts reject artifacts outside the accounted root.
-2. Run `scripts/bootstrap/backend/verify_artifact.ps1` for the artifact kind.
-3. Run the applicable `install_python.ps1` or `install_postgres.ps1`; each executes pre/post aggregate resource gates and never modifies the machine `PATH` or registers PostgreSQL as a service.
-4. Supply a non-empty password file under the attributable root, then initialize through `scripts/dev/postgres/initialize.ps1`. No default credential is provided or generated.
-5. Run `scripts/dev/postgres/test_runtime.ps1`. It must prove a clean start, real `pg_isready`, a `127.0.0.1`-only listener, exact binary execution, and bounded fast shutdown.
+Future Python provisioning must use an artifact beneath `%LOCALAPPDATA%\ThriveLens`, then pass the pre-mutation projection/free-disk gate, official hash and Authenticode checks, a no-follow installed-tree ceiling, and the post-mutation aggregate gate. PostgreSQL initialization cannot be enabled until the integration owner first updates `docs/privacy/DATA_INVENTORY.md`; that required document is outside TL-R0-003 ownership.
+
+If an authorized WSL foundation is later delivered, `test_runtime.ps1` must prove real readiness, loopback-only ownership, exact versions from `postgres`, `pg_ctl`, `initdb`, and `pg_isready`, bounded start/stop, and exact process/listener absence **before** reporting PASS.
 
 Stop is cleanup-safe even under low memory:
 
@@ -51,4 +51,4 @@ pwsh -NoProfile -File scripts/dev/postgres/stop.ps1
 
 ## Compose contract
 
-`infra/compose.yaml` has exactly one service, binds the host side only to `127.0.0.1`, pins the Docker Official Image by immutable index digest, requires a password file, and caps runtime memory. It is not executed on this host. Copying `.env.example` does not create a usable credential; the blank password-file path is intentionally fail-closed.
+`infra/compose.yaml` has exactly one service, is disabled unless the explicit `postgres-explicit` profile is selected, fixes `platform: linux/amd64`, and pins that platform's child manifest digest. It binds only to `127.0.0.1`, uses an attributable bind directory instead of a named volume, requires a protected password file, and caps runtime memory. `validate_compose_inputs.ps1` remains blocked until container-engine storage accounting and the data inventory gate are configured. Copying `.env.example` creates neither storage nor a credential; both paths are intentionally blank.
