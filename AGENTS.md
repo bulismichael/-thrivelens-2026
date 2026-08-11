@@ -43,6 +43,7 @@ If a control file does not exist yet, the active task is Wave 1 control-plane sy
 - Prefer deterministic fixtures, portable/minimal services, bounded caches, and sequential local builds on this 8 GB host.
 - Do not run an Android emulator, database, Flutter build, and web build concurrently on this host.
 - Stop before an install/build projected to breach the cap; report the measured size and the smallest alternative.
+- Keep attributable SDKs, caches, task worktrees, and local data under the aggregate-counted `%LOCALAPPDATA%\ThriveLens` root because the synced repository path contains spaces.
 
 ## Quality and privacy
 

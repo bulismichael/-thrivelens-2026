@@ -1,7 +1,8 @@
-# Project-local toolchains and caches are deliberately kept inside the workspace
-# so scripts/check_resource_budget.ps1 can account for the complete delivery footprint.
+# Repository-local fallbacks remain ignored. Preferred attributable toolchains,
+# caches, worktrees, and data live under the separately counted local ThriveLens root.
 .tooling/
 .cache/
+.worktrees/
 .venv/
 **/.venv/
 **/node_modules/

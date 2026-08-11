@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "allowed_states": ["NOT_STARTED", "SPECIFIED", "CODE_COMPLETE", "AUTOMATED_TESTED", "INTEGRATED", "EMULATOR_VERIFIED", "PHYSICAL_DEVICE_VERIFIED", "DATASET_EVALUATED", "DOMAIN_REVIEWED", "LANGUAGE_REVIEWED", "SECURITY_REVIEWED", "PILOT_READY", "PRODUCTION_APPROVED"],
+  "features": [
+    {"id": "TL-F-R0-AGENTS", "release": "R0", "name": "Project delivery contract and agent pool", "state": "CODE_COMPLETE", "task_ids": [], "evidence": ["commit:44515a0"], "human_gates": []},
+    {"id": "TL-F-R0-CONTROL", "release": "R0", "name": "Durable delivery control plane", "state": "SPECIFIED", "task_ids": ["TL-R0-001"], "evidence": ["task:TL-R0-001"], "human_gates": []},
+    {"id": "TL-F-R0-CONTRACT", "release": "R0", "name": "Canonical heartbeat and structured-error contracts", "state": "NOT_STARTED", "task_ids": ["TL-R0-002"], "evidence": [], "human_gates": []},
+    {"id": "TL-F-R0-POSTGRES", "release": "R0", "name": "PostgreSQL migration-aware readiness", "state": "NOT_STARTED", "task_ids": ["TL-R0-003", "TL-R0-004"], "evidence": [], "human_gates": []},
+    {"id": "TL-F-R0-API", "release": "R0", "name": "FastAPI liveness readiness status and version", "state": "NOT_STARTED", "task_ids": ["TL-R0-005"], "evidence": [], "human_gates": []},
+    {"id": "TL-F-R0-CLIENT", "release": "R0", "name": "Generated Dart API client", "state": "NOT_STARTED", "task_ids": ["TL-R0-006"], "evidence": [], "human_gates": []},
+    {"id": "TL-F-R0-MOBILE", "release": "R0", "name": "Flutter system-status experience", "state": "NOT_STARTED", "task_ids": ["TL-R0-007", "TL-R0-008"], "evidence": [], "human_gates": ["TL-D-007", "TL-D-013"]},
+    {"id": "TL-F-R0-CI", "release": "R0", "name": "Sequential quality and supply-chain harness", "state": "NOT_STARTED", "task_ids": ["TL-R0-009", "TL-R0-010"], "evidence": [], "human_gates": []},
+    {"id": "TL-F-R1-IDENTITY", "release": "R1", "name": "Adult identity consent and profile", "state": "NOT_STARTED", "task_ids": [], "evidence": [], "human_gates": ["TL-D-001", "TL-D-002", "TL-D-005", "TL-D-009", "TL-D-015"]},
+    {"id": "TL-F-R1-EVIDENCE", "release": "R1", "name": "Evidence approval and grounded assistant", "state": "NOT_STARTED", "task_ids": [], "evidence": [], "human_gates": ["TL-D-008"]},
+    {"id": "TL-F-R1-MEALS", "release": "R1", "name": "Manual meals portions and deterministic nutrition", "state": "NOT_STARTED", "task_ids": [], "evidence": [], "human_gates": ["TL-D-003", "TL-D-008"]},
+    {"id": "TL-F-R1-PLANS", "release": "R1", "name": "Safe goals and deterministic weekly plans", "state": "NOT_STARTED", "task_ids": [], "evidence": [], "human_gates": ["TL-D-003", "TL-D-004"]},
+    {"id": "TL-F-R1-PRIVACY", "release": "R1", "name": "Progress export and deletion", "state": "NOT_STARTED", "task_ids": [], "evidence": [], "human_gates": ["TL-D-005", "TL-D-009"]},
+    {"id": "TL-F-R2-MEAL-AI", "release": "R2", "name": "Meal image candidate assistance", "state": "NOT_STARTED", "task_ids": [], "evidence": [], "human_gates": ["TL-D-003", "TL-D-011", "TL-D-012"]},
+    {"id": "TL-F-R3-MOVEMENT", "release": "R3", "name": "Workouts routes and nearby places", "state": "NOT_STARTED", "task_ids": [], "evidence": [], "human_gates": ["TL-D-004", "TL-D-005", "TL-D-013"]},
+    {"id": "TL-F-R3-POSE", "release": "R3", "name": "Two-exercise optional on-device pose", "state": "NOT_STARTED", "task_ids": [], "evidence": [], "human_gates": ["TL-D-004", "TL-D-012", "TL-D-013"]},
+    {"id": "TL-F-R4-ADVANCED", "release": "R4", "name": "Advanced gated intelligence and personalisation", "state": "NOT_STARTED", "task_ids": [], "evidence": [], "human_gates": ["TL-D-003", "TL-D-004", "TL-D-006", "TL-D-008", "TL-D-011", "TL-D-012", "TL-D-017"]},
+    {"id": "TL-F-R5-OPERATIONS", "release": "R5", "name": "Operational hardening and reference deployment", "state": "NOT_STARTED", "task_ids": [], "evidence": [], "human_gates": ["TL-D-005", "TL-D-009", "TL-D-010", "TL-D-015", "TL-D-017"]},
+    {"id": "TL-F-R6-PILOT", "release": "R6", "name": "Controlled-pilot validation package", "state": "NOT_STARTED", "task_ids": [], "evidence": [], "human_gates": ["TL-D-001", "TL-D-002", "TL-D-003", "TL-D-004", "TL-D-005", "TL-D-006", "TL-D-007", "TL-D-008", "TL-D-009", "TL-D-010", "TL-D-011", "TL-D-012", "TL-D-013", "TL-D-014", "TL-D-015", "TL-D-016", "TL-D-017"]}
+  ],
+  "providers": []
+}

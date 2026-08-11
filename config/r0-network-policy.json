@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "production_enabled": false,
+  "api": {
+    "bind_host": "127.0.0.1",
+    "port": 8000,
+    "cors_enabled": false,
+    "web_origin_mode": "same_origin",
+    "reject_cross_origin_options": true
+  },
+  "android_debug": {
+    "transport": "adb_reverse",
+    "selected_device_required": true,
+    "device_host": "127.0.0.1",
+    "device_port": 8000,
+    "host_host": "127.0.0.1",
+    "host_port": 8000,
+    "base_url": "http://127.0.0.1:8000/api/v1",
+    "cleartext_allowed": true,
+    "remove_mapping_on_exit": true
+  },
+  "android_release": {
+    "cleartext_allowed": false,
+    "reject_debug_base_url": true,
+    "production_enabled": false
+  }
+}
