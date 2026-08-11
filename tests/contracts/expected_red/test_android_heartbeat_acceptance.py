@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -16,6 +16,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from scripts.contracts.bounded_process import BoundedProcessError, run_bounded_process
 from scripts.contracts.r0_transport import (
     inspect_release_apk_bytes,
     load_policy,
@@ -120,18 +121,21 @@ def _pinned_aapt2_path(marker: str) -> Path:
 
 
 def _run_pinned_analyzer(analyzer: Path, arguments: list[str]) -> str:
-    result = subprocess.run(
-        [str(analyzer), *arguments],
-        cwd=REPOSITORY_ROOT,
-        capture_output=True,
-        timeout=20,
-        check=False,
-    )
-    if len(result.stdout) + len(result.stderr) > 2 * 1024 * 1024:
-        raise AssertionError("pinned Android analyzer exceeded its output limit")
+    try:
+        result = run_bounded_process(
+            [str(analyzer), *arguments],
+            cwd=REPOSITORY_ROOT,
+            maximum_output_bytes=2 * 1024 * 1024,
+            timeout_seconds=20,
+        )
+    except BoundedProcessError as error:
+        raise AssertionError(str(error)) from None
     if result.returncode != 0:
         raise AssertionError("pinned Android analyzer rejected the release artifact")
-    return result.stdout.decode("utf-8", errors="strict")
+    try:
+        return result.stdout.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise AssertionError("pinned Android analyzer output is not UTF-8") from None
 
 
 class AndroidHeartbeatAcceptanceTests(unittest.TestCase):

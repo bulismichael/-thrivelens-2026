@@ -1,16 +1,46 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from expected_red import test_android_heartbeat_acceptance as acceptance
+
+
+def _process_is_running(process_id: int) -> bool:
+    if os.name == "nt":
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x00100000, False, process_id)
+        if not handle:
+            return False
+        try:
+            return kernel32.WaitForSingleObject(handle, 0) == 0x00000102
+        finally:
+            kernel32.CloseHandle(handle)
+
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class ReleaseAnalyzerContractTests(unittest.TestCase):
@@ -97,6 +127,58 @@ class ReleaseAnalyzerContractTests(unittest.TestCase):
             acceptance._run_pinned_analyzer(
                 Path(sys.executable),
                 ["-c", "raise SystemExit(7)"],
+            )
+
+    def test_analyzer_aggregate_output_cap_terminates_the_entire_tree(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="thrivelens-r0-analyzer-cap-") as temporary:
+            root = Path(temporary)
+            fixture = root / "over-cap-analyzer.py"
+            process_record = root / "processes.json"
+            fixture.write_text(
+                """
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(8)"],
+    stdout=sys.stdout,
+    stderr=sys.stderr,
+)
+Path(sys.argv[1]).write_text(
+    json.dumps({"parent": os.getpid(), "child": child.pid}),
+    encoding="utf-8",
+)
+chunk = b"X" * 65536
+for _ in range(20):
+    sys.stdout.buffer.write(chunk)
+    sys.stdout.buffer.flush()
+for _ in range(20):
+    sys.stderr.buffer.write(chunk)
+    sys.stderr.buffer.flush()
+time.sleep(8)
+""".strip(),
+                encoding="utf-8",
+            )
+            started_at = time.monotonic()
+            with self.assertRaisesRegex(AssertionError, "output limit"):
+                acceptance._run_pinned_analyzer(
+                    Path(sys.executable),
+                    [str(fixture), str(process_record)],
+                )
+            self.assertLess(time.monotonic() - started_at, 5.0)
+            process_ids = json.loads(process_record.read_text(encoding="utf-8"))
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and any(
+                _process_is_running(process_id) for process_id in process_ids.values()
+            ):
+                time.sleep(0.01)
+            self.assertFalse(
+                any(_process_is_running(process_id) for process_id in process_ids.values()),
+                "bounded analyzer runner left a fixture process alive",
             )
 
 
