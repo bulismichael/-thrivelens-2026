@@ -1,27 +1,80 @@
 #Requires -Version 7.0
 
 [CmdletBinding()]
-param(
-    [string]$DataDirectory,
-    [string]$PasswordFile = $env:TL_POSTGRES_ADMIN_PASSWORD_FILE
-)
+param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $modulePath = Join-Path $PSScriptRoot 'Runtime.psm1'
 
+function Get-ProcessEnvironmentValue {
+    param([Parameter(Mandatory)][string]$Name)
+    return [string][Environment]::GetEnvironmentVariable(
+        $Name,
+        [EnvironmentVariableTarget]::Process
+    )
+}
+
 try {
     Import-Module -Name $modulePath -Force
     $manifest = Get-ThriveLensManifest
     $blockers = [Collections.Generic.List[string]]::new()
-    if ([string]::IsNullOrWhiteSpace($DataDirectory)) {
-        $DataDirectory = [Environment]::ExpandEnvironmentVariables([string]$manifest.compose.data_root)
+
+    # There is deliberately no runnable Compose service yet. A future wrapper
+    # must validate and consume one immutable process-environment snapshot in
+    # the same process before it generates and invokes temporary configuration.
+    $blockers.Add('COMPOSE_ACTIVATION_WRAPPER_REQUIRED')
+    $remainingArguments = @(Get-Variable -Name args -ValueOnly -ErrorAction SilentlyContinue)
+    if ($remainingArguments.Count -ne 0) {
+        $blockers.Add('COMPOSE_PARAMETER_OVERRIDE_REJECTED')
+    }
+
+    $environmentNames = $manifest.compose.environment_contract
+    $inputSnapshot = [pscustomobject]@{
+        DataDirectory = Get-ProcessEnvironmentValue -Name ([string]$environmentNames.data_directory)
+        PasswordFile = Get-ProcessEnvironmentValue -Name ([string]$environmentNames.password_file)
+        AdminUser = Get-ProcessEnvironmentValue -Name ([string]$environmentNames.admin_user)
+        Database = Get-ProcessEnvironmentValue -Name ([string]$environmentNames.database)
+        Port = Get-ProcessEnvironmentValue -Name ([string]$environmentNames.port)
     }
 
     if ([bool]$manifest.compose.enabled_by_default -or
-        [string]$manifest.compose.required_profile -cne 'postgres-explicit') {
-        $blockers.Add('COMPOSE_DEFAULT_DISABLE_POLICY_INVALID')
+        [bool]$manifest.compose.direct_compose_activation_permitted -or
+        -not [bool]$manifest.compose.activation_wrapper_required -or
+        -not [bool]$manifest.compose.same_process_validation_and_use_required -or
+        [string]$manifest.compose.activation_status -cne 'BLOCKED_GATED_ACTIVATION_WRAPPER_NOT_IMPLEMENTED' -or
+        [string]$manifest.compose.activation_wrapper_status -cne 'REQUIRED_NOT_IMPLEMENTED') {
+        $blockers.Add('COMPOSE_ACTIVATION_POLICY_INVALID')
     }
+    if ([string]$manifest.compose.required_profile -cne 'postgres-explicit') {
+        $blockers.Add('COMPOSE_FUTURE_PROFILE_POLICY_INVALID')
+    }
+    if ([string]$manifest.compose.listen_address -cne '127.0.0.1' -or
+        [int]$manifest.compose.port -ne 55432 -or
+        [string]$manifest.compose.admin_user -cne 'tl_bootstrap' -or
+        [string]$manifest.compose.database -cne 'thrivelens_r0') {
+        $blockers.Add('COMPOSE_PINNED_INPUT_POLICY_INVALID')
+    }
+
+    if ([string]::IsNullOrWhiteSpace($inputSnapshot.AdminUser)) {
+        $blockers.Add('COMPOSE_ADMIN_USER_REQUIRED')
+    }
+    elseif ($inputSnapshot.AdminUser -cne [string]$manifest.compose.admin_user) {
+        $blockers.Add('COMPOSE_ADMIN_USER_MISMATCH')
+    }
+    if ([string]::IsNullOrWhiteSpace($inputSnapshot.Database)) {
+        $blockers.Add('COMPOSE_DATABASE_REQUIRED')
+    }
+    elseif ($inputSnapshot.Database -cne [string]$manifest.compose.database) {
+        $blockers.Add('COMPOSE_DATABASE_MISMATCH')
+    }
+    if ([string]::IsNullOrWhiteSpace($inputSnapshot.Port)) {
+        $blockers.Add('COMPOSE_PORT_REQUIRED')
+    }
+    elseif ($inputSnapshot.Port -cne ([string][int]$manifest.compose.port)) {
+        $blockers.Add('COMPOSE_PORT_MISMATCH')
+    }
+
     if ([string]$manifest.compose.engine_storage_accounting_status -cne 'CONFIGURED') {
         $blockers.Add('COMPOSE_ENGINE_STORAGE_ACCOUNTING_REQUIRED')
     }
@@ -52,10 +105,13 @@ try {
     }
     catch { $blockers.Add('MEMORY_MEASUREMENT_UNAVAILABLE') }
 
-    if (-not [string]::IsNullOrWhiteSpace($DataDirectory)) {
+    if ([string]::IsNullOrWhiteSpace($inputSnapshot.DataDirectory)) {
+        $blockers.Add('COMPOSE_DATA_DIRECTORY_REQUIRED')
+    }
+    else {
         try {
             $dataPath = Assert-ThriveLensComposeDataDirectory `
-                -Path $DataDirectory `
+                -Path ([Environment]::ExpandEnvironmentVariables($inputSnapshot.DataDirectory)) `
                 -ExpectedPath ([string]$manifest.compose.data_root)
         }
         catch {
@@ -77,14 +133,15 @@ try {
             else { $blockers.Add('COMPOSE_DATA_POLICY_FAILED') }
         }
     }
-    else { $blockers.Add('COMPOSE_DATA_DIRECTORY_REQUIRED') }
 
-    if ([string]::IsNullOrWhiteSpace($PasswordFile)) {
+    if ([string]::IsNullOrWhiteSpace($inputSnapshot.PasswordFile)) {
         $blockers.Add('COMPOSE_PASSWORD_FILE_REQUIRED')
     }
     else {
         try {
-            $secretPath = Assert-ThriveLensOwnedPath -Path $PasswordFile -AllowMissing
+            $secretPath = Assert-ThriveLensOwnedPath `
+                -Path ([Environment]::ExpandEnvironmentVariables($inputSnapshot.PasswordFile)) `
+                -AllowMissing
             $null = Assert-ThriveLensPathOutsideDirectory `
                 -DirectoryPath ([string]$manifest.compose.data_root) `
                 -OtherPath $secretPath
@@ -113,24 +170,15 @@ try {
         }
     }
 
-    if ($blockers.Count -gt 0) {
-        [pscustomobject]@{
-            schema_version = 1
-            status = 'BLOCKED'
-            profile = [string]$manifest.compose.required_profile
-            projected_additional_bytes = [int64]$manifest.compose.projected_additional_bytes
-            codes = @($blockers | Select-Object -Unique)
-        } | ConvertTo-Json -Compress
-        exit 2
-    }
-
     [pscustomobject]@{
         schema_version = 1
-        status = 'READY'
-        profile = [string]$manifest.compose.required_profile
-        platform = [string]$manifest.compose.platform
+        status = 'BLOCKED'
+        activation_status = [string]$manifest.compose.activation_status
+        environment_snapshot_read_once = $true
         projected_additional_bytes = [int64]$manifest.compose.projected_additional_bytes
+        codes = @($blockers | Select-Object -Unique)
     } | ConvertTo-Json -Compress
+    exit 2
 }
 catch {
     [pscustomobject]@{ schema_version = 1; status = 'ERROR'; code = 'COMPOSE_VALIDATION_INTERNAL_ERROR' } | ConvertTo-Json -Compress

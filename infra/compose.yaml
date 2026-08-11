@@ -1,32 +1,42 @@
-services:
-  postgres:
-    profiles: ["postgres-explicit"]
-    platform: linux/amd64
-    image: postgres:17.10-bookworm@sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923
-    restart: "no"
-    environment:
-      POSTGRES_USER: ${TL_POSTGRES_ADMIN_USER:?Set TL_POSTGRES_ADMIN_USER}
-      POSTGRES_DB: ${TL_POSTGRES_DATABASE:?Set TL_POSTGRES_DATABASE}
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
-      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256 --data-checksums
-    secrets:
-      - postgres_admin_password
-    ports:
-      - "127.0.0.1:${TL_POSTGRES_PORT:-55432}:5432"
-    volumes:
-      - type: bind
-        source: ${LOCALAPPDATA:?LOCALAPPDATA is required}/ThriveLens/data/postgresql/compose-r0
-        target: /var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -q -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 10s
-    mem_limit: 512m
-    shm_size: 64mb
-    stop_grace_period: 30s
+services: {}
 
-secrets:
-  postgres_admin_password:
-    file: ${TL_POSTGRES_ADMIN_PASSWORD_FILE:?Set TL_POSTGRES_ADMIN_PASSWORD_FILE}
+x-thrivelens-postgres-contract:
+  schema_version: 1
+  status: BLOCKED_GATED_ACTIVATION_WRAPPER_NOT_IMPLEMENTED
+  direct_compose_activation_permitted: false
+  restart_policy: "no"
+  required_profile: postgres-explicit
+  platform: linux/amd64
+  image_reference: postgres:17.10-bookworm@sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923
+  index_digest: sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
+  endpoint:
+    listen_address: 127.0.0.1
+    host_port: 55432
+    container_port: 5432
+  identity:
+    admin_user: tl_bootstrap
+    database: thrivelens_r0
+  intended_environment:
+    data_directory: TL_POSTGRES_COMPOSE_DATA_DIR
+    password_file: TL_POSTGRES_ADMIN_PASSWORD_FILE
+    admin_user: TL_POSTGRES_ADMIN_USER
+    database: TL_POSTGRES_DATABASE
+    port: TL_POSTGRES_PORT
+  host_paths:
+    data_root: "%LOCALAPPDATA%\\ThriveLens\\data\\postgresql\\compose-r0"
+    password_file: REQUIRED_OUTSIDE_DATA_ROOT
+  initialization:
+    auth_host: scram-sha-256
+    auth_local: scram-sha-256
+    data_checksums: true
+  limits:
+    compressed_layer_bytes: 156095657
+    runtime_bytes: 536870912
+    shared_memory_bytes: 67108864
+    data_bytes: 134217728
+    projected_additional_bytes: 827184297
+    stop_grace_seconds: 30
+  future_activation:
+    mandatory_wrapper_status: REQUIRED_NOT_IMPLEMENTED
+    same_process_validation_and_use_required: true
+    temporary_generated_config_required: true

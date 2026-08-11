@@ -15,6 +15,35 @@ function Assert-Condition {
     if (-not $Condition) { $failures.Add($Code) }
 }
 
+function Invoke-ComposeValidatorProbe {
+    param(
+        [Parameter(Mandatory)][hashtable]$EnvironmentValues,
+        [string[]]$AdditionalArguments = @()
+    )
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = Join-Path $PSHOME 'pwsh.exe'
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = $true
+    $startInfo.ArgumentList.Add('-NoProfile')
+    $startInfo.ArgumentList.Add('-File')
+    $startInfo.ArgumentList.Add((Join-Path $PSScriptRoot 'validate_compose_inputs.ps1'))
+    foreach ($argument in $AdditionalArguments) { $startInfo.ArgumentList.Add($argument) }
+    foreach ($name in $EnvironmentValues.Keys) {
+        $startInfo.Environment[[string]$name] = [string]$EnvironmentValues[$name]
+    }
+    $process = [Diagnostics.Process]::Start($startInfo)
+    $standardOutput = $process.StandardOutput.ReadToEnd()
+    $standardError = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        StandardOutput = $standardOutput.Trim()
+        StandardError = $standardError.Trim()
+    }
+}
+
 try {
     $scriptRoots = @(
         (Join-Path $projectRoot 'scripts\bootstrap\backend'),
@@ -92,24 +121,82 @@ try {
     Assert-Condition ($pythonInstaller -match 'PYTHON_INSTALL_DISABLED_UNMEASURED_SCRATCH_CACHE') 'PYTHON_INSTALL_HARD_DISABLED'
     Assert-Condition ($pythonInstaller -notmatch '(?i)Start-Process|Get-Item|Get-Content|Test-Path|Get-FileHash|Invoke-ThriveLensResourceGate') 'PYTHON_BLOCK_BEFORE_ARTIFACT_PROCESS_USE'
 
-    $compose = Get-Content -LiteralPath (Join-Path $projectRoot 'infra\compose.yaml') -Raw
-    Assert-Condition ($compose -match '127\.0\.0\.1:\$\{TL_POSTGRES_PORT:-55432\}:5432') 'COMPOSE_LOOPBACK'
+    $composePath = Join-Path $projectRoot 'infra\compose.yaml'
+    $compose = Get-Content -LiteralPath $composePath -Raw
+    Assert-Condition ($compose -match '(?m)^services:\s*\{\}\s*$') 'COMPOSE_SERVICES_EMPTY'
+    Assert-Condition ($compose -match '(?m)^x-thrivelens-postgres-contract:\s*$') 'COMPOSE_EXTENSION_CONTRACT'
+    Assert-Condition ($compose -match 'status: BLOCKED_GATED_ACTIVATION_WRAPPER_NOT_IMPLEMENTED') 'COMPOSE_WRAPPER_BLOCKED'
+    Assert-Condition ($compose -match 'direct_compose_activation_permitted: false') 'COMPOSE_DIRECT_ACTIVATION_BLOCKED'
+    Assert-Condition ($compose -match 'restart_policy: "no"') 'COMPOSE_NO_RESTART_POLICY'
+    Assert-Condition ($compose -notmatch '\$\{') 'COMPOSE_NO_INTERPOLATION'
+    Assert-Condition ($compose -notmatch '(?m)^\s+(?:image|ports|volumes|secrets|build|command|entrypoint|container_name):') 'COMPOSE_NO_RUNNABLE_SERVICE_SURFACE'
     Assert-Condition ($compose -notmatch '0\.0\.0\.0') 'COMPOSE_NO_WILDCARD'
-    Assert-Condition ($compose -match 'postgres:17\.10-bookworm@sha256:[0-9a-f]{64}') 'COMPOSE_DIGEST_PIN'
+    Assert-Condition ($compose -match 'image_reference: postgres:17\.10-bookworm@sha256:[0-9a-f]{64}') 'COMPOSE_DIGEST_PIN'
     Assert-Condition ($compose -match 'sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923') 'COMPOSE_AMD64_CHILD_DIGEST'
     Assert-Condition ($compose -match 'platform: linux/amd64') 'COMPOSE_AMD64_PLATFORM'
-    Assert-Condition ($compose -match 'profiles: \["postgres-explicit"\]') 'COMPOSE_DEFAULT_DISABLED_PROFILE'
-    Assert-Condition ($compose -match 'POSTGRES_PASSWORD_FILE') 'COMPOSE_SECRET_FILE'
-    Assert-Condition ($compose -notmatch 'POSTGRES_PASSWORD\s*:') 'COMPOSE_NO_INLINE_PASSWORD'
-    Assert-Condition ($compose -match 'type: bind') 'COMPOSE_COUNTED_BIND'
-    Assert-Condition ($compose -match '\$\{LOCALAPPDATA:\?LOCALAPPDATA is required\}/ThriveLens/data/postgresql/compose-r0') 'COMPOSE_EXACT_DATA_BIND'
-    Assert-Condition ($compose -notmatch '(?m)^volumes:') 'COMPOSE_NO_NAMED_VOLUME'
+    Assert-Condition ($compose -match 'listen_address: 127\.0\.0\.1') 'COMPOSE_LOOPBACK'
+    Assert-Condition ($compose -match 'host_port: 55432') 'COMPOSE_FIXED_HOST_PORT'
+    Assert-Condition ($compose -match 'admin_user: tl_bootstrap') 'COMPOSE_FIXED_ADMIN_USER'
+    Assert-Condition ($compose -match 'database: thrivelens_r0') 'COMPOSE_FIXED_DATABASE'
+    Assert-Condition ($compose -match 'data_root: "%LOCALAPPDATA%\\\\ThriveLens\\\\data\\\\postgresql\\\\compose-r0"') 'COMPOSE_EXACT_DATA_DESCRIPTOR'
+    Assert-Condition ($compose -match 'runtime_bytes: 536870912') 'COMPOSE_RUNTIME_LIMIT_DESCRIPTOR'
+    Assert-Condition ($compose -match 'data_bytes: 134217728') 'COMPOSE_DATA_LIMIT_DESCRIPTOR'
+    Assert-Condition ($compose -match 'same_process_validation_and_use_required: true') 'COMPOSE_NO_VALIDATION_USE_GAP'
+    Assert-Condition ($compose -notmatch '(?m)^secrets:') 'COMPOSE_NO_SECRET_OBJECT'
     Assert-Condition ($composeValidator -match 'COMPOSE_ENGINE_STORAGE_ACCOUNTING_REQUIRED') 'COMPOSE_ACCOUNTING_GATE'
+    Assert-Condition ($composeValidator -match 'COMPOSE_ACTIVATION_WRAPPER_REQUIRED') 'COMPOSE_WRAPPER_GATE'
+    Assert-Condition ($composeValidator -match 'COMPOSE_ADMIN_USER_MISMATCH') 'COMPOSE_ADMIN_USER_GATE'
+    Assert-Condition ($composeValidator -match 'COMPOSE_DATABASE_MISMATCH') 'COMPOSE_DATABASE_GATE'
+    Assert-Condition ($composeValidator -match 'COMPOSE_PORT_MISMATCH') 'COMPOSE_PORT_GATE'
+    Assert-Condition ($composeValidator -match 'GetEnvironmentVariable') 'COMPOSE_PROCESS_ENVIRONMENT_INPUT'
     Assert-Condition ($composeValidator -match 'Assert-ThriveLensComposeDataDirectory') 'COMPOSE_EXACT_DATA_GATE'
     Assert-Condition ($composeValidator -match 'COMPOSE_DATA_DIRECTORY_NOT_EMPTY') 'COMPOSE_EMPTY_DATA_GATE'
     Assert-Condition ($composeValidator -match 'Assert-ThriveLensPathOutsideDirectory') 'COMPOSE_DISJOINT_SECRET_GATE'
     Assert-Condition ($composeValidator -match 'DIRECTORY_ACL_ALLOWLIST_VIOLATION') 'COMPOSE_DIRECTORY_ACL_GATE'
     Assert-Condition ($composeValidator -match 'Assert-ThriveLensSecretFileAcl') 'COMPOSE_SECRET_ACL_GATE'
+
+    $validatorTokens = $null
+    $validatorErrors = $null
+    $validatorAst = [Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $PSScriptRoot 'validate_compose_inputs.ps1'),
+        [ref]$validatorTokens,
+        [ref]$validatorErrors
+    )
+    Assert-Condition (@($validatorErrors).Count -eq 0) 'COMPOSE_VALIDATOR_PARSE_FOR_PARAMETERS'
+    Assert-Condition ($validatorAst.ParamBlock.Parameters.Count -eq 0) 'COMPOSE_VALIDATOR_NO_PARAMETER_OVERRIDE'
+
+    $manifest = Get-Content -LiteralPath (Join-Path $projectRoot 'config\toolchains\backend.json') -Raw | ConvertFrom-Json
+    $validEnvironment = @{
+        TL_POSTGRES_COMPOSE_DATA_DIR = [Environment]::ExpandEnvironmentVariables([string]$manifest.compose.data_root)
+        TL_POSTGRES_ADMIN_PASSWORD_FILE = ''
+        TL_POSTGRES_ADMIN_USER = [string]$manifest.compose.admin_user
+        TL_POSTGRES_DATABASE = [string]$manifest.compose.database
+        TL_POSTGRES_PORT = [string][int]$manifest.compose.port
+    }
+    $validProbe = Invoke-ComposeValidatorProbe -EnvironmentValues $validEnvironment
+    $validPayload = $validProbe.StandardOutput | ConvertFrom-Json
+    Assert-Condition ($validProbe.ExitCode -eq 2) 'COMPOSE_VALID_INPUT_STILL_BLOCKED'
+    Assert-Condition (@($validPayload.codes) -ccontains 'COMPOSE_ACTIVATION_WRAPPER_REQUIRED') 'COMPOSE_VALID_INPUT_WRAPPER_REQUIRED'
+    Assert-Condition (@($validPayload.codes) -cnotcontains 'COMPOSE_ADMIN_USER_MISMATCH') 'COMPOSE_VALID_ADMIN_ACCEPTED'
+    Assert-Condition (@($validPayload.codes) -cnotcontains 'COMPOSE_DATABASE_MISMATCH') 'COMPOSE_VALID_DATABASE_ACCEPTED'
+    Assert-Condition (@($validPayload.codes) -cnotcontains 'COMPOSE_PORT_MISMATCH') 'COMPOSE_VALID_PORT_ACCEPTED'
+
+    $unsafeEnvironment = $validEnvironment.Clone()
+    $unsafeEnvironment.TL_POSTGRES_ADMIN_USER = 'tl_bootstrap;whoami'
+    $unsafeEnvironment.TL_POSTGRES_DATABASE = 'thrivelens_r0/../postgres'
+    $unsafeEnvironment.TL_POSTGRES_PORT = '55432:5432'
+    $unsafeProbe = Invoke-ComposeValidatorProbe -EnvironmentValues $unsafeEnvironment
+    $unsafePayload = $unsafeProbe.StandardOutput | ConvertFrom-Json
+    Assert-Condition ($unsafeProbe.ExitCode -eq 2) 'COMPOSE_UNSAFE_INPUT_BLOCKED'
+    Assert-Condition (@($unsafePayload.codes) -ccontains 'COMPOSE_ADMIN_USER_MISMATCH') 'COMPOSE_UNSAFE_ADMIN_REJECTED'
+    Assert-Condition (@($unsafePayload.codes) -ccontains 'COMPOSE_DATABASE_MISMATCH') 'COMPOSE_UNSAFE_DATABASE_REJECTED'
+    Assert-Condition (@($unsafePayload.codes) -ccontains 'COMPOSE_PORT_MISMATCH') 'COMPOSE_UNSAFE_PORT_REJECTED'
+
+    $overrideProbe = Invoke-ComposeValidatorProbe `
+        -EnvironmentValues $validEnvironment `
+        -AdditionalArguments @('-DataDirectory', 'C:\unsafe-override')
+    Assert-Condition ($overrideProbe.ExitCode -ne 0) 'COMPOSE_PARAMETER_OVERRIDE_BLOCKED'
+    Assert-Condition ((($overrideProbe.StandardOutput + $overrideProbe.StandardError) -notmatch '"status"\s*:\s*"READY"')) 'COMPOSE_PARAMETER_OVERRIDE_NEVER_READY'
 
     if ($failures.Count -gt 0) {
         [pscustomobject]@{ schema_version = 1; status = 'FAIL'; codes = @($failures) } | ConvertTo-Json -Compress
