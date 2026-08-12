@@ -29,6 +29,35 @@ function Stop-ThriveLensPreflightDistro {
     Assert-ThriveLensHostPortAbsent
 }
 
+function Complete-ThriveLensPreflightProbeAndAdmit {
+    param(
+        [Parameter(Mandatory)]$IdentityToken,
+        [Parameter(Mandatory)][Threading.Mutex]$LifecycleLock,
+        [Parameter(Mandatory)][int64]$MinimumFreeMemoryBytes
+    )
+    Stop-ThriveLensPreflightDistro -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
+    try {
+        Wait-ThriveLensInterCycleMemorySettle -MinimumFreeMemoryBytes $MinimumFreeMemoryBytes
+    }
+    catch {
+        switch ([string]$_.Exception.Message) {
+            'RESOURCE_INTER_CYCLE_MEMORY_NOT_SETTLED' { throw 'LOW_FREE_MEMORY_AFTER_WSL_PROBES' }
+            'RESOURCE_INTER_CYCLE_MEMORY_MEASUREMENT_UNAVAILABLE' { throw 'MEMORY_MEASUREMENT_UNAVAILABLE_AFTER_WSL_PROBES' }
+            default { throw 'MEMORY_MEASUREMENT_UNAVAILABLE_AFTER_WSL_PROBES' }
+        }
+    }
+    Assert-ThriveLensDistroStopped
+    $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
+    Assert-ThriveLensHostPortAbsent
+
+    try{$memoryValues=@(Get-ThriveLensFreeMemoryBytes)}catch{throw 'MEMORY_MEASUREMENT_UNAVAILABLE_AFTER_WSL_PROBES'}
+    if($memoryValues.Count -ne 1 -or $null -eq $memoryValues[0] -or $memoryValues[0] -is [bool]){throw 'MEMORY_MEASUREMENT_UNAVAILABLE_AFTER_WSL_PROBES'}
+    $memoryText=[Convert]::ToString($memoryValues[0],[Globalization.CultureInfo]::InvariantCulture)
+    $freeMemoryBytes=[int64]0
+    if(-not [int64]::TryParse($memoryText,[Globalization.NumberStyles]::Integer,[Globalization.CultureInfo]::InvariantCulture,[ref]$freeMemoryBytes) -or $freeMemoryBytes -lt 0){throw 'MEMORY_MEASUREMENT_UNAVAILABLE_AFTER_WSL_PROBES'}
+    if($freeMemoryBytes -lt $MinimumFreeMemoryBytes){throw 'LOW_FREE_MEMORY_AFTER_WSL_PROBES'}
+}
+
 try {
     Import-Module (Join-Path $PSScriptRoot 'Runtime.psm1') -Force
     Import-Module (Join-Path $PSScriptRoot 'WslRuntime.psm1') -Force
@@ -44,7 +73,8 @@ try {
     }
     elseif ($Action -eq 'Initialize') { $projection = [int64]$manifest.resource_policy.postgresql_initialization_worst_case_additional_bytes }
     try { $null = Invoke-ThriveLensResourceGate -ProjectedAdditionalBytes $projection } catch { $code=$_.Exception.Message;if($code -notmatch '^[A-Z0-9_]+$'){$code='RESOURCE_GATE_FAILED'};$blockers.Add($code) }
-    $minimum = if ($Action -eq 'Install') { [int64]$manifest.resource_policy.install_minimum_free_memory_bytes } else { [int64]$manifest.resource_policy.runtime_minimum_free_memory_bytes }
+    $memoryPolicy = Get-ThriveLensMemoryPolicyThresholds -Manifest $manifest
+    $minimum = if ($Action -eq 'Install') { $memoryPolicy.InstallMinimumBytes } else { $memoryPolicy.RuntimeMinimumBytes }
     try{if ((Get-ThriveLensFreeMemoryBytes) -lt $minimum) { $blockers.Add('LOW_FREE_MEMORY') }}catch{$blockers.Add('MEMORY_MEASUREMENT_UNAVAILABLE')}
     if($blockers.Count -gt 0){
         [pscustomobject]@{schema_version=1;status='BLOCKED';action=$Action;install_kind=if($Action -eq 'Install'){$InstallKind}else{$null};projected_additional_bytes=$projection;codes=@($blockers|Select-Object -Unique)}|ConvertTo-Json -Compress;exit 2
@@ -65,9 +95,17 @@ try {
     if ($Action -eq 'Runtime') {
         try{$clusterState=Get-ThriveLensWslClusterState;if($clusterState -ceq 'ABSENT'){$blockers.Add('POSTGRES_CLUSTER_UNAVAILABLE')}elseif($clusterState -cne 'VALID'){$blockers.Add('PARTIAL_CLUSTER_PRESENT')}}catch{$blockers.Add('CLUSTER_STATE_MEASUREMENT_UNAVAILABLE')}
     }
-    try{if((Get-ThriveLensFreeMemoryBytes) -lt $minimum){$blockers.Add('LOW_FREE_MEMORY_AFTER_WSL_PROBES')}}catch{$blockers.Add('MEMORY_MEASUREMENT_UNAVAILABLE_AFTER_WSL_PROBES')}
-    try { Stop-ThriveLensPreflightDistro -IdentityToken $cleanupIdentityToken -LifecycleLock $preflightLock } catch {
-        [pscustomobject]@{schema_version=1;status='ERROR';action=$Action;codes=@('PREFLIGHT_DISTRO_CLEANUP_FAILED')}|ConvertTo-Json -Compress;exit 3
+    try {
+        Complete-ThriveLensPreflightProbeAndAdmit -IdentityToken $cleanupIdentityToken -LifecycleLock $preflightLock -MinimumFreeMemoryBytes $minimum
+    }
+    catch {
+        $postProbeCode=[string]$_.Exception.Message
+        if($postProbeCode -cin @('LOW_FREE_MEMORY_AFTER_WSL_PROBES','MEMORY_MEASUREMENT_UNAVAILABLE_AFTER_WSL_PROBES')){
+            $blockers.Add($postProbeCode)
+        }
+        else{
+            [pscustomobject]@{schema_version=1;status='ERROR';action=$Action;codes=@('PREFLIGHT_DISTRO_CLEANUP_FAILED')}|ConvertTo-Json -Compress;exit 3
+        }
     }
     if ($blockers.Count -gt 0) {
         $safeCodes=@($blockers|ForEach-Object{if($_ -match '^[A-Z0-9_]+$'){$_}else{'WSL_VALIDATION_FAILED'}}|Select-Object -Unique)

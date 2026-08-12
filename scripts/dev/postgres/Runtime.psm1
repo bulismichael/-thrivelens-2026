@@ -893,6 +893,42 @@ function Get-ThriveLensFreeMemoryBytes {
     }
 }
 
+function Get-ThriveLensMemoryPolicyThresholds {
+    param([Parameter(Mandatory)]$Manifest)
+
+    try {
+        $policyValues = @($Manifest.resource_policy)
+        if ($policyValues.Count -ne 1 -or $null -eq $policyValues[0] -or
+            $policyValues[0] -is [bool]) {
+            throw 'INVALID_MEMORY_POLICY'
+        }
+        $validatedValues = [int64[]]::new(2)
+        $fieldNames = @(
+            'runtime_minimum_free_memory_bytes',
+            'install_minimum_free_memory_bytes'
+        )
+        for ($index = 0; $index -lt $fieldNames.Count; $index++) {
+            $property = $policyValues[0].PSObject.Properties[$fieldNames[$index]]
+            [object[]]$candidateValues = if ($null -eq $property) { @() } else { @($property.Value) }
+            if ($candidateValues.Count -ne 1 -or $null -eq $candidateValues[0] -or
+                $candidateValues[0] -isnot [int64]) {
+                throw 'INVALID_MEMORY_POLICY'
+            }
+            $candidateBytes = [int64]$candidateValues[0]
+            if ($candidateBytes -le 0) { throw 'INVALID_MEMORY_POLICY' }
+            $validatedValues[$index] = $candidateBytes
+        }
+        return [pscustomobject]@{
+            RuntimeMinimumBytes = [int64]$validatedValues[0]
+            InstallMinimumBytes = [int64]$validatedValues[1]
+            StartReclaimTargetBytes = [int64][Math]::Max($validatedValues[0], $validatedValues[1])
+        }
+    }
+    catch {
+        throw 'RUNTIME_MEMORY_POLICY_INVALID'
+    }
+}
+
 function Wait-ThriveLensInterCycleMemorySettle {
     param(
         [Parameter(Mandatory)][int64]$MinimumFreeMemoryBytes
@@ -1807,6 +1843,7 @@ Export-ModuleMember -Function @(
     'Assert-ThriveLensOwnedPath',
     'Get-ThriveLensPostgresPaths',
     'Get-ThriveLensFreeMemoryBytes',
+    'Get-ThriveLensMemoryPolicyThresholds',
     'Wait-ThriveLensInterCycleMemorySettle',
     'Get-ThriveLensResourcePhase',
     'Assert-ThriveLensProjectedBudget',

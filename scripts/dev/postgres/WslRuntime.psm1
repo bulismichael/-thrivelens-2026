@@ -1159,15 +1159,9 @@ function Invoke-ThriveLensPostgresStartUnderLock {
             throw 'RESOURCE_GATE_FAILED'
         }
 
-        try {
-            $minimumValues=@($leasedManifest.resource_policy.runtime_minimum_free_memory_bytes)
-            if($minimumValues.Count -ne 1 -or $minimumValues[0] -is [bool]){throw 'INVALID_RUNTIME_MEMORY_POLICY'}
-            $minimumText=[Convert]::ToString($minimumValues[0],[Globalization.CultureInfo]::InvariantCulture)
-            $runtimeMinimumBytes=[int64]0
-            if(-not [int64]::TryParse($minimumText,[Globalization.NumberStyles]::Integer,[Globalization.CultureInfo]::InvariantCulture,[ref]$runtimeMinimumBytes) -or
-               $runtimeMinimumBytes -le 0){throw 'INVALID_RUNTIME_MEMORY_POLICY'}
-        }
-        catch{throw 'RUNTIME_MEMORY_POLICY_INVALID'}
+        $memoryPolicy=Get-ThriveLensMemoryPolicyThresholds -Manifest $leasedManifest
+        $runtimeMinimumBytes=[int64]$memoryPolicy.RuntimeMinimumBytes
+        $startReclaimTargetBytes=[int64]$memoryPolicy.StartReclaimTargetBytes
 
         try{$memoryValues=@(Get-ThriveLensFreeMemoryBytes)}catch{throw 'MEMORY_MEASUREMENT_UNAVAILABLE'}
         if($memoryValues.Count -ne 1 -or $memoryValues[0] -is [bool]){throw 'MEMORY_MEASUREMENT_UNAVAILABLE'}
@@ -1182,7 +1176,32 @@ function Invoke-ThriveLensPostgresStartUnderLock {
         $null=Assert-ThriveLensWslPackages -Contract $leasedContract -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
         $null=Assert-ThriveLensWslInternalDisk -RequiredBytes 0 -Contract $leasedContract -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
         if((Get-ThriveLensWslClusterState -Paths $paths -Contract $leasedContract -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock) -cne 'VALID'){throw 'POSTGRES_CLUSTER_INVALID_AFTER_LIFECYCLE_LOCK'}
-        $null=Assert-ThriveLensLinuxPathPolicy -RequireLeaf -Paths $paths -Contract $leasedContract -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
+        $null=Assert-ThriveLensWslAbsent -Paths $paths -Contract $leasedContract -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
+        $null=Assert-ThriveLensHostPortAbsent -Paths $paths -Contract $leasedContract
+
+        # Read-only WSL validation launches the dedicated distro. Reclaim that
+        # probe footprint under the same lock and exact host identity token,
+        # then admit start only after bounded host-only memory settling.
+        $null=Stop-ThriveLensDistroAndVerify -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock -Contract $leasedContract
+        try {
+            Wait-ThriveLensInterCycleMemorySettle -MinimumFreeMemoryBytes $startReclaimTargetBytes
+        }
+        catch {
+            switch ([string]$_.Exception.Message) {
+                'RESOURCE_INTER_CYCLE_MEMORY_NOT_SETTLED' { throw 'LOW_FREE_MEMORY_AFTER_WSL_PROBES' }
+                'RESOURCE_INTER_CYCLE_MEMORY_MEASUREMENT_UNAVAILABLE' { throw 'MEMORY_MEASUREMENT_UNAVAILABLE_AFTER_WSL_PROBES' }
+                default { throw 'MEMORY_MEASUREMENT_UNAVAILABLE_AFTER_WSL_PROBES' }
+            }
+        }
+
+        $options="-h 127.0.0.1 -p $($paths.Port) -c max_connections=20 -c shared_buffers=64MB -c work_mem=2MB -c maintenance_work_mem=32MB -c password_encryption=scram-sha-256 -c logging_collector=off -c log_statement=none -c log_connections=off -c log_disconnections=off -c log_hostname=off -c log_min_error_statement=panic"
+
+        $null=Assert-ThriveLensConfigurationLease -Lease $ConfigurationLease
+        $commitFingerprintValues=@(Get-ThriveLensConfigurationLeaseFingerprint -Lease $ConfigurationLease)
+        if($commitFingerprintValues.Count -ne 1 -or [string]$commitFingerprintValues[0] -cne $entryFingerprint){
+            throw 'CONFIGURATION_LEASE_CHANGED'
+        }
+        $null=Assert-ThriveLensWslIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock -Contract $leasedContract
         $null=Assert-ThriveLensWslAbsent -Paths $paths -Contract $leasedContract -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
         $null=Assert-ThriveLensHostPortAbsent -Paths $paths -Contract $leasedContract
 
@@ -1193,14 +1212,6 @@ function Invoke-ThriveLensPostgresStartUnderLock {
         if(-not [int64]::TryParse($memoryText,[Globalization.NumberStyles]::Integer,[Globalization.CultureInfo]::InvariantCulture,[ref]$freeMemoryBytes) -or
            $freeMemoryBytes -lt 0){throw 'MEMORY_MEASUREMENT_UNAVAILABLE_AFTER_WSL_PROBES'}
         if($freeMemoryBytes -lt $runtimeMinimumBytes){throw 'LOW_FREE_MEMORY_AFTER_WSL_PROBES'}
-
-        $null=Assert-ThriveLensConfigurationLease -Lease $ConfigurationLease
-        $commitFingerprintValues=@(Get-ThriveLensConfigurationLeaseFingerprint -Lease $ConfigurationLease)
-        if($commitFingerprintValues.Count -ne 1 -or [string]$commitFingerprintValues[0] -cne $entryFingerprint){
-            throw 'CONFIGURATION_LEASE_CHANGED'
-        }
-        $null=Assert-ThriveLensWslIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock -Contract $leasedContract
-        $options="-h 127.0.0.1 -p $($paths.Port) -c max_connections=20 -c shared_buffers=64MB -c work_mem=2MB -c maintenance_work_mem=32MB -c password_encryption=scram-sha-256 -c logging_collector=off -c log_statement=none -c log_connections=off -c log_disconnections=off -c log_hostname=off -c log_min_error_statement=panic"
 
         $StartAttempted.Value=$true
         $startResult=Invoke-ThriveLensGuardedDistro -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock -TimeoutSeconds 45 -Contract $leasedContract -Arguments @('/usr/sbin/runuser','-u','postgres','--',$paths.PgCtl,'start','-D',$paths.DataRoot,'-l','/dev/null','-o',$options,'-w','-t','30')
