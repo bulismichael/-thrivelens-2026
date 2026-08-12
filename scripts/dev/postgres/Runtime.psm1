@@ -98,6 +98,633 @@ namespace ThriveLens {
 '@
 }
 
+if (-not ('ThriveLens.ResourceGateCaptureStreamV2' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace ThriveLens {
+    public sealed class ResourceGateOutputBudgetV2 {
+        public const string ContractVersion = "TL_RESOURCE_GATE_CAPTURE_V2";
+        long count;
+        public long Limit { get; private set; }
+        public bool Exceeded { get; private set; }
+        public ResourceGateOutputBudgetV2(long limit) {
+            if (limit < 1) throw new ArgumentOutOfRangeException("limit");
+            Limit = limit;
+        }
+        public void Add(int value) {
+            long total = Interlocked.Add(ref count, value);
+            if (total > Limit) {
+                Exceeded = true;
+                throw new IOException("RESOURCE_GATE_OUTPUT_LIMIT");
+            }
+        }
+    }
+
+    public sealed class ResourceGateCaptureStreamV2 : Stream {
+        public const string ContractVersion = "TL_RESOURCE_GATE_CAPTURE_V2";
+        readonly ResourceGateOutputBudgetV2 budget;
+        readonly MemoryStream data = new MemoryStream();
+        public ResourceGateCaptureStreamV2(ResourceGateOutputBudgetV2 sharedBudget) {
+            budget = sharedBudget ?? throw new ArgumentNullException("sharedBudget");
+        }
+        void Put(byte[] buffer, int offset, int count) {
+            budget.Add(count);
+            data.Write(buffer, offset, count);
+        }
+        public byte[] ToArray() { return data.ToArray(); }
+        public override void Write(byte[] buffer, int offset, int count) {
+            Put(buffer, offset, count);
+        }
+        public override Task WriteAsync(
+            byte[] buffer, int offset, int count, CancellationToken cancellationToken
+        ) {
+            Put(buffer, offset, count);
+            return Task.CompletedTask;
+        }
+        public override bool CanRead { get { return false; } }
+        public override bool CanSeek { get { return false; } }
+        public override bool CanWrite { get { return true; } }
+        public override long Length { get { return data.Length; } }
+        public override long Position {
+            get { return data.Position; }
+            set { throw new NotSupportedException(); }
+        }
+        public override void Flush() { }
+        public override Task FlushAsync(CancellationToken cancellationToken) {
+            return Task.CompletedTask;
+        }
+        public override int Read(byte[] buffer, int offset, int count) {
+            throw new NotSupportedException();
+        }
+        public override long Seek(long offset, SeekOrigin origin) {
+            throw new NotSupportedException();
+        }
+        public override void SetLength(long value) {
+            throw new NotSupportedException();
+        }
+        protected override void Dispose(bool disposing) {
+            if (disposing) data.Dispose();
+            base.Dispose(disposing);
+        }
+    }
+}
+'@
+}
+
+if ([ThriveLens.ResourceGateOutputBudgetV2]::ContractVersion -cne
+        'TL_RESOURCE_GATE_CAPTURE_V2' -or
+    [ThriveLens.ResourceGateCaptureStreamV2]::ContractVersion -cne
+        'TL_RESOURCE_GATE_CAPTURE_V2') {
+    throw 'RESOURCE_GATE_CAPTURE_CONTRACT_INVALID'
+}
+$resourceGateCaptureProbeBudget = [ThriveLens.ResourceGateOutputBudgetV2]::new(4)
+$resourceGateCaptureProbe = [ThriveLens.ResourceGateCaptureStreamV2]::new(
+    $resourceGateCaptureProbeBudget
+)
+try {
+    $resourceGateCaptureProbe.Write([byte[]](1, 2, 3), 0, 3)
+    $overflowObserved = $false
+    try { $resourceGateCaptureProbe.Write([byte[]](4, 5), 0, 2) }
+    catch [IO.IOException] { $overflowObserved = $true }
+    $probeBytes = $resourceGateCaptureProbe.ToArray()
+    try {
+        if (-not $overflowObserved -or -not $resourceGateCaptureProbeBudget.Exceeded -or
+            $probeBytes.Length -ne 3) {
+            throw 'RESOURCE_GATE_CAPTURE_CONTRACT_INVALID'
+        }
+    }
+    finally { [Array]::Clear($probeBytes, 0, $probeBytes.Length) }
+}
+finally {
+    $resourceGateCaptureProbe.Dispose()
+    $resourceGateCaptureProbe = $null
+    $resourceGateCaptureProbeBudget = $null
+}
+
+$script:ThriveLensConfigurationLeaseStates =
+    [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
+
+function Get-ThriveLensConfigurationLeaseDefinitions {
+    $projectRoot = Get-ThriveLensProjectRoot
+    return @(
+        [pscustomobject]@{
+            Role = 'BACKEND_MANIFEST'
+            Path = [IO.Path]::GetFullPath((Join-Path $projectRoot 'config\toolchains\backend.json'))
+            MaximumLength = 1MB
+        },
+        [pscustomobject]@{
+            Role = 'RESOURCE_BUDGET'
+            Path = [IO.Path]::GetFullPath((Join-Path $projectRoot 'config\resource-budget.json'))
+            MaximumLength = 256KB
+        }
+    )
+}
+
+function Assert-ThriveLensConfigurationJsonString {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+
+    foreach ($character in $Value.ToCharArray()) {
+        if ([Globalization.CharUnicodeInfo]::GetUnicodeCategory($character) -eq
+            [Globalization.UnicodeCategory]::Control) {
+            throw 'CONFIGURATION_LEASE_JSON_CONTROL_REJECTED'
+        }
+    }
+}
+
+function Assert-ThriveLensConfigurationJsonElement {
+    param([Parameter(Mandatory)][Text.Json.JsonElement]$Element)
+
+    switch ($Element.ValueKind) {
+        ([Text.Json.JsonValueKind]::Object) {
+            # PowerShell property access is case-insensitive. Reject both exact
+            # duplicates and case-variant aliases before ConvertFrom-Json can
+            # collapse policy meaning at a later call site.
+            $propertyNames = [Collections.Generic.HashSet[string]]::new(
+                [StringComparer]::OrdinalIgnoreCase
+            )
+            foreach ($property in $Element.EnumerateObject()) {
+                Assert-ThriveLensConfigurationJsonString -Value $property.Name
+                if (-not $propertyNames.Add($property.Name)) {
+                    throw 'CONFIGURATION_LEASE_JSON_DUPLICATE_PROPERTY'
+                }
+                Assert-ThriveLensConfigurationJsonElement -Element $property.Value
+            }
+        }
+        ([Text.Json.JsonValueKind]::Array) {
+            foreach ($item in $Element.EnumerateArray()) {
+                Assert-ThriveLensConfigurationJsonElement -Element $item
+            }
+        }
+        ([Text.Json.JsonValueKind]::String) {
+            Assert-ThriveLensConfigurationJsonString -Value $Element.GetString()
+        }
+    }
+}
+
+function Assert-ThriveLensConfigurationJsonBytes {
+    param(
+        [Parameter(Mandatory)][byte[]]$Bytes,
+        [Parameter(Mandatory)][int64]$MaximumLength
+    )
+
+    if ($Bytes.Length -lt 1 -or $Bytes.Length -gt $MaximumLength) {
+        throw 'CONFIGURATION_LEASE_LENGTH_INVALID'
+    }
+    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and
+        $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
+        throw 'CONFIGURATION_LEASE_BOM_REJECTED'
+    }
+    foreach ($value in $Bytes) {
+        if (($value -lt 0x20 -and $value -notin @(0x09, 0x0A, 0x0D)) -or $value -eq 0x7F) {
+            throw 'CONFIGURATION_LEASE_JSON_CONTROL_REJECTED'
+        }
+    }
+
+    try { $rawJson = [Text.UTF8Encoding]::new($false, $true).GetString($Bytes) }
+    catch { throw 'CONFIGURATION_LEASE_UTF8_INVALID' }
+
+    $document = $null
+    try {
+        $options = [Text.Json.JsonDocumentOptions]::new()
+        $options.AllowTrailingCommas = $false
+        $options.CommentHandling = [Text.Json.JsonCommentHandling]::Disallow
+        $options.MaxDepth = 128
+        $memory = [ReadOnlyMemory[byte]]::new($Bytes)
+        $document = [Text.Json.JsonDocument]::Parse($memory, $options)
+        if ($document.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+            throw 'CONFIGURATION_LEASE_JSON_ROOT_INVALID'
+        }
+        Assert-ThriveLensConfigurationJsonElement -Element $document.RootElement
+    }
+    catch {
+        if ($_.Exception.Message -clike 'CONFIGURATION_LEASE_*') { throw }
+        throw 'CONFIGURATION_LEASE_JSON_INVALID'
+    }
+    finally {
+        if ($null -ne $document) { $document.Dispose() }
+    }
+    return $rawJson
+}
+
+function Get-ThriveLensConfigurationLeaseSnapshot {
+    param(
+        [Parameter(Mandatory)][IO.FileStream]$Stream,
+        [Parameter(Mandatory)][string]$ExpectedPath
+    )
+
+    try { $snapshot = [ThriveLens.ExclusiveFileSnapshot]::Capture($Stream.SafeFileHandle) }
+    catch { throw 'CONFIGURATION_LEASE_IDENTITY_UNAVAILABLE' }
+    $finalPath = ConvertFrom-ThriveLensFinalPath -Path $snapshot.FinalPath
+    try { $finalPath = [IO.Path]::GetFullPath($finalPath) }
+    catch { throw 'CONFIGURATION_LEASE_FINAL_PATH_INVALID' }
+    if (-not $finalPath.Equals($ExpectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'CONFIGURATION_LEASE_FINAL_PATH_MISMATCH'
+    }
+    if (($snapshot.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        ($snapshot.Attributes -band [IO.FileAttributes]::Directory) -ne 0 -or
+        $snapshot.LinkCount -ne 1) {
+        throw 'CONFIGURATION_LEASE_IDENTITY_REJECTED'
+    }
+    return [pscustomobject]@{
+        Path = $finalPath
+        Identity = [string]$snapshot.Identity
+        Length = [int64]$snapshot.Length
+        Attributes = [int64]$snapshot.Attributes
+        LinkCount = [int64]$snapshot.LinkCount
+    }
+}
+
+function Read-ThriveLensConfigurationLeaseStream {
+    param(
+        [Parameter(Mandatory)][IO.FileStream]$Stream,
+        [Parameter(Mandatory)][int64]$Length,
+        [Parameter(Mandatory)][int64]$MaximumLength
+    )
+
+    if ($Length -lt 1 -or $Length -gt $MaximumLength -or $Length -gt [int]::MaxValue) {
+        throw 'CONFIGURATION_LEASE_LENGTH_INVALID'
+    }
+    $bytes = [byte[]]::new([int]$Length)
+    try {
+        try { $Stream.Position = 0 }
+        catch { throw 'CONFIGURATION_LEASE_STREAM_UNREADABLE' }
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            try { $read = $Stream.Read($bytes, $offset, $bytes.Length - $offset) }
+            catch { throw 'CONFIGURATION_LEASE_READ_FAILED' }
+            if ($read -le 0) { throw 'CONFIGURATION_LEASE_READ_INCOMPLETE' }
+            $offset += $read
+        }
+        if ($Stream.ReadByte() -ne -1) { throw 'CONFIGURATION_LEASE_LENGTH_CHANGED' }
+        $rawJson = Assert-ThriveLensConfigurationJsonBytes `
+            -Bytes $bytes `
+            -MaximumLength $MaximumLength
+        $sha256 = [Convert]::ToHexString(
+            [Security.Cryptography.SHA256]::HashData($bytes)
+        )
+        return [pscustomobject]@{
+            RawJson = $rawJson
+            Sha256 = $sha256
+        }
+    }
+    finally {
+        [Array]::Clear($bytes, 0, $bytes.Length)
+    }
+}
+
+function New-ThriveLensConfigurationLeaseRecord {
+    param([Parameter(Mandatory)]$Definition)
+
+    if (-not (Test-Path -LiteralPath $Definition.Path -PathType Leaf)) {
+        throw 'CONFIGURATION_LEASE_FILE_UNAVAILABLE'
+    }
+    try { $item = Get-Item -LiteralPath $Definition.Path -Force -ErrorAction Stop }
+    catch { throw 'CONFIGURATION_LEASE_FILE_UNAVAILABLE' }
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        ($item.Attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+        throw 'CONFIGURATION_LEASE_PATH_REJECTED'
+    }
+
+    $stream = $null
+    try {
+        try {
+            $stream = [IO.FileStream]::new(
+                $Definition.Path,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::Read,
+                4096,
+                [IO.FileOptions]::SequentialScan
+            )
+        }
+        catch { throw 'CONFIGURATION_LEASE_OPEN_FAILED' }
+
+        $before = Get-ThriveLensConfigurationLeaseSnapshot `
+            -Stream $stream `
+            -ExpectedPath $Definition.Path
+        if ($before.Length -lt 1 -or $before.Length -gt $Definition.MaximumLength) {
+            throw 'CONFIGURATION_LEASE_LENGTH_INVALID'
+        }
+        $content = Read-ThriveLensConfigurationLeaseStream `
+            -Stream $stream `
+            -Length $before.Length `
+            -MaximumLength $Definition.MaximumLength
+        $after = Get-ThriveLensConfigurationLeaseSnapshot `
+            -Stream $stream `
+            -ExpectedPath $Definition.Path
+        if ($after.Path -cne $before.Path -or $after.Identity -cne $before.Identity -or
+            $after.Length -ne $before.Length -or $after.Attributes -ne $before.Attributes -or
+            $after.LinkCount -ne $before.LinkCount) {
+            throw 'CONFIGURATION_LEASE_IDENTITY_CHANGED'
+        }
+
+        return [pscustomobject]@{
+            Role = [string]$Definition.Role
+            Path = [string]$before.Path
+            Sha256 = [string]$content.Sha256
+            RawJson = [string]$content.RawJson
+            Identity = [string]$before.Identity
+            Length = [int64]$before.Length
+            Attributes = [int64]$before.Attributes
+            LinkCount = [int64]$before.LinkCount
+            MaximumLength = [int64]$Definition.MaximumLength
+            Stream = $stream
+        }
+    }
+    catch {
+        if ($null -ne $stream) { $stream.Dispose() }
+        throw
+    }
+}
+
+function Enter-ThriveLensConfigurationLease {
+    $definitions = @(Get-ThriveLensConfigurationLeaseDefinitions)
+    $internalRecords = [Collections.Generic.List[object]]::new()
+    $completed = $false
+    try {
+        $expectedRoles = @('BACKEND_MANIFEST', 'RESOURCE_BUDGET')
+        if ($definitions.Count -ne $expectedRoles.Count) {
+            throw 'CONFIGURATION_LEASE_INVALID'
+        }
+        for ($index = 0; $index -lt $definitions.Count; $index++) {
+            try {
+                if ([string]$definitions[$index].Role -cne $expectedRoles[$index] -or
+                    [string]::IsNullOrWhiteSpace([string]$definitions[$index].Path) -or
+                    [int64]$definitions[$index].MaximumLength -le 0) {
+                    throw 'CONFIGURATION_LEASE_INVALID'
+                }
+            }
+            catch { throw 'CONFIGURATION_LEASE_INVALID' }
+        }
+        foreach ($definition in $definitions) {
+            # The order is security-significant: backend first, then resource budget.
+            $internalRecords.Add((New-ThriveLensConfigurationLeaseRecord -Definition $definition))
+        }
+
+        $publicRoles = [string[]]::new($internalRecords.Count)
+        $internalStreams = [IO.FileStream[]]::new($internalRecords.Count)
+        for ($index = 0; $index -lt $internalRecords.Count; $index++) {
+            $record = $internalRecords[$index]
+            $publicRoles[$index] = [string]$record.Role
+            $internalStreams[$index] = $record.Stream
+        }
+        $lease = [pscustomobject]@{
+            Version = 1
+            Roles = $publicRoles
+        }
+        $state = [pscustomobject]@{
+            Lease = $lease
+            PublicRoles = $publicRoles
+            InternalRecords = @($internalRecords)
+            InternalStreams = $internalStreams
+            Exited = $false
+        }
+        $script:ThriveLensConfigurationLeaseStates.Add($lease, $state)
+        $completed = $true
+        return $lease
+    }
+    finally {
+        if (-not $completed) {
+            for ($index = $internalRecords.Count - 1; $index -ge 0; $index--) {
+                try { $internalRecords[$index].Stream.Dispose() }
+                catch { }
+            }
+        }
+    }
+}
+
+function Get-ThriveLensConfigurationLeaseState {
+    param([Parameter(Mandatory)]$Lease)
+
+    $state = $null
+    if (-not $script:ThriveLensConfigurationLeaseStates.TryGetValue(
+        [object]$Lease,
+        [ref]$state
+    )) {
+        throw 'CONFIGURATION_LEASE_INVALID'
+    }
+    return $state
+}
+
+function Test-ThriveLensConfigurationLeasePublicShape {
+    param(
+        [Parameter(Mandatory)]$Lease,
+        [Parameter(Mandatory)]$State
+    )
+
+    try {
+        $propertyNames = @($Lease.PSObject.Properties | ForEach-Object { [string]$_.Name })
+        if ($propertyNames.Count -ne 2 -or
+            $propertyNames[0] -cne 'Version' -or
+            $propertyNames[1] -cne 'Roles' -or
+            $Lease.Version -isnot [int] -or
+            $Lease.Version -ne 1 -or
+            $Lease.Roles -isnot [string[]] -or
+            -not [object]::ReferenceEquals($Lease, $State.Lease) -or
+            -not [object]::ReferenceEquals($Lease.Roles, $State.PublicRoles) -or
+            $Lease.Roles.Count -ne 2 -or
+            $State.InternalRecords.Count -ne 2) {
+            return $false
+        }
+        $expectedRoles = @('BACKEND_MANIFEST', 'RESOURCE_BUDGET')
+        for ($index = 0; $index -lt $State.InternalRecords.Count; $index++) {
+            $internal = $State.InternalRecords[$index]
+            if ($Lease.Roles[$index] -cne $expectedRoles[$index] -or
+                $Lease.Roles[$index] -cne [string]$internal.Role) {
+                return $false
+            }
+        }
+        return $true
+    }
+    catch { return $false }
+}
+
+function Assert-ThriveLensConfigurationLeaseInternalIntegrity {
+    param(
+        [Parameter(Mandatory)]$Lease,
+        [Parameter(Mandatory)]$State
+    )
+
+    try {
+        if ($State.Exited -isnot [bool] -or $State.Exited -or
+            -not [object]::ReferenceEquals($Lease, $State.Lease) -or
+            $State.InternalRecords.Count -ne 2 -or
+            $State.InternalStreams -isnot [IO.FileStream[]] -or
+            $State.InternalStreams.Count -ne $State.InternalRecords.Count) {
+            throw 'CONFIGURATION_LEASE_INVALID'
+        }
+        $definitions = @(Get-ThriveLensConfigurationLeaseDefinitions)
+        if ($definitions.Count -ne $State.InternalRecords.Count) {
+            throw 'CONFIGURATION_LEASE_INVALID'
+        }
+    }
+    catch { throw 'CONFIGURATION_LEASE_INVALID' }
+
+    $expectedRoles = @('BACKEND_MANIFEST', 'RESOURCE_BUDGET')
+    for ($index = 0; $index -lt $definitions.Count; $index++) {
+        $definition = $definitions[$index]
+        $record = $State.InternalRecords[$index]
+        $stream = $State.InternalStreams[$index]
+        try {
+            $definitionPath = [IO.Path]::GetFullPath([string]$definition.Path)
+            if ([string]$definition.Role -cne $expectedRoles[$index] -or
+                [string]$record.Role -cne $expectedRoles[$index] -or
+                [string]$record.Role -cne [string]$definition.Role -or
+                -not ([string]$record.Path).Equals(
+                    $definitionPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                [int64]$record.MaximumLength -ne [int64]$definition.MaximumLength -or
+                [int64]$record.MaximumLength -le 0 -or
+                $record.Sha256 -cnotmatch '^[0-9A-F]{64}$' -or
+                $record.Length -lt 1 -or $record.Length -gt $record.MaximumLength -or
+                $record.LinkCount -ne 1 -or
+                $stream -isnot [IO.FileStream] -or
+                -not [object]::ReferenceEquals($record.Stream, $stream) -or
+                -not $stream.CanRead -or
+                $stream.SafeFileHandle.IsClosed -or
+                $stream.SafeFileHandle.IsInvalid) {
+                throw 'CONFIGURATION_LEASE_INVALID'
+            }
+        }
+        catch { throw 'CONFIGURATION_LEASE_INVALID' }
+
+        $snapshot = Get-ThriveLensConfigurationLeaseSnapshot `
+            -Stream $stream `
+            -ExpectedPath $definitionPath
+        if (-not $snapshot.Path.Equals($definitionPath, [StringComparison]::OrdinalIgnoreCase) -or
+            $snapshot.Identity -cne $record.Identity -or $snapshot.Length -ne $record.Length -or
+            $snapshot.Attributes -ne $record.Attributes -or
+            $snapshot.LinkCount -ne $record.LinkCount) {
+            throw 'CONFIGURATION_LEASE_IDENTITY_CHANGED'
+        }
+        $content = Read-ThriveLensConfigurationLeaseStream `
+            -Stream $stream `
+            -Length $record.Length `
+            -MaximumLength $record.MaximumLength
+        if ($content.Sha256 -cne $record.Sha256 -or $content.RawJson -cne $record.RawJson) {
+            throw 'CONFIGURATION_LEASE_CONTENT_CHANGED'
+        }
+        $afterRead = Get-ThriveLensConfigurationLeaseSnapshot `
+            -Stream $stream `
+            -ExpectedPath $definitionPath
+        if (-not $afterRead.Path.Equals($definitionPath, [StringComparison]::OrdinalIgnoreCase) -or
+            $afterRead.Identity -cne $record.Identity -or
+            $afterRead.Length -ne $record.Length -or
+            $afterRead.Attributes -ne $record.Attributes -or
+            $afterRead.LinkCount -ne $record.LinkCount) {
+            throw 'CONFIGURATION_LEASE_IDENTITY_CHANGED'
+        }
+        # Parse the immutable retained text again as part of every assertion.
+        $retainedBytes = [Text.UTF8Encoding]::new($false, $true).GetBytes($record.RawJson)
+        try {
+            $retainedRaw = Assert-ThriveLensConfigurationJsonBytes `
+                -Bytes $retainedBytes `
+                -MaximumLength $record.MaximumLength
+            if ($retainedRaw -cne $record.RawJson) {
+                throw 'CONFIGURATION_LEASE_CONTENT_CHANGED'
+            }
+        }
+        finally {
+            [Array]::Clear($retainedBytes, 0, $retainedBytes.Length)
+        }
+    }
+}
+
+function Assert-ThriveLensConfigurationLease {
+    param([Parameter(Mandatory)]$Lease)
+
+    $state = Get-ThriveLensConfigurationLeaseState -Lease $Lease
+    if (-not (Test-ThriveLensConfigurationLeasePublicShape -Lease $Lease -State $state)) {
+        throw 'CONFIGURATION_LEASE_INVALID'
+    }
+    Assert-ThriveLensConfigurationLeaseInternalIntegrity -Lease $Lease -State $state
+}
+
+function Get-ThriveLensLeasedConfigurationValue {
+    param(
+        [Parameter(Mandatory)]$Lease,
+        [Parameter(Mandatory)][ValidateSet('BACKEND_MANIFEST', 'RESOURCE_BUDGET')][string]$Role
+    )
+
+    Assert-ThriveLensConfigurationLease -Lease $Lease
+    $state = Get-ThriveLensConfigurationLeaseState -Lease $Lease
+    $record = @($state.InternalRecords | Where-Object { $_.Role -ceq $Role })
+    if ($record.Count -ne 1) { throw 'CONFIGURATION_LEASE_INVALID' }
+    $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes($record[0].RawJson)
+    try {
+        $rawJson = Assert-ThriveLensConfigurationJsonBytes `
+            -Bytes $bytes `
+            -MaximumLength $record[0].MaximumLength
+        try { return $rawJson | ConvertFrom-Json -Depth 128 }
+        catch { throw 'CONFIGURATION_LEASE_JSON_INVALID' }
+    }
+    finally {
+        [Array]::Clear($bytes, 0, $bytes.Length)
+    }
+}
+
+function Get-ThriveLensLeasedBackendManifest {
+    param([Parameter(Mandatory)]$Lease)
+    return Get-ThriveLensLeasedConfigurationValue -Lease $Lease -Role 'BACKEND_MANIFEST'
+}
+
+function Get-ThriveLensLeasedResourceBudget {
+    param([Parameter(Mandatory)]$Lease)
+    return Get-ThriveLensLeasedConfigurationValue -Lease $Lease -Role 'RESOURCE_BUDGET'
+}
+
+function Get-ThriveLensConfigurationLeaseFingerprint {
+    param([Parameter(Mandatory)]$Lease)
+
+    Assert-ThriveLensConfigurationLease -Lease $Lease
+    $state = Get-ThriveLensConfigurationLeaseState -Lease $Lease
+    $components = [Collections.Generic.List[string]]::new()
+    $components.Add('THRIVELENS_CONFIGURATION_LEASE_V1')
+    foreach ($record in $state.InternalRecords) {
+        $components.Add(('{0}:{1}:{2}' -f $record.Role, $record.Length, $record.Sha256))
+    }
+    $fingerprintBytes = [Text.Encoding]::UTF8.GetBytes(($components -join "`n"))
+    try {
+        return [Convert]::ToHexString(
+            [Security.Cryptography.SHA256]::HashData($fingerprintBytes)
+        )
+    }
+    finally {
+        [Array]::Clear($fingerprintBytes, 0, $fingerprintBytes.Length)
+    }
+}
+
+function Exit-ThriveLensConfigurationLease {
+    param([Parameter(Mandatory)]$Lease)
+
+    $state = Get-ThriveLensConfigurationLeaseState -Lease $Lease
+    $shapeValid = Test-ThriveLensConfigurationLeasePublicShape -Lease $Lease -State $state
+    $integrityValid = $true
+    try {
+        Assert-ThriveLensConfigurationLeaseInternalIntegrity -Lease $Lease -State $state
+    }
+    catch { $integrityValid = $false }
+    $releaseFailed = $false
+    try {
+        for ($index = $state.InternalStreams.Count - 1; $index -ge 0; $index--) {
+            try { $state.InternalStreams[$index].Dispose() }
+            catch { $releaseFailed = $true }
+        }
+    }
+    catch { $releaseFailed = $true }
+    try {
+        $state.Exited = $true
+    }
+    catch { $releaseFailed = $true }
+    if (-not $shapeValid -or -not $integrityValid) { throw 'CONFIGURATION_LEASE_INVALID' }
+    if ($releaseFailed) { throw 'CONFIGURATION_LEASE_RELEASE_FAILED' }
+}
+
 function Get-ThriveLensProjectRoot {
     $root = Join-Path $PSScriptRoot '..\..\..'
     return (Resolve-Path -LiteralPath $root).Path
@@ -375,33 +1002,335 @@ function Assert-ThriveLensFreeDiskBudget {
     return $requiredFreeBytes
 }
 
-function Invoke-ThriveLensResourceGate {
-    param([int64]$ProjectedAdditionalBytes = 0)
+function ConvertTo-ThriveLensResourcePolicyInt64 {
+    param([Parameter(Mandatory)]$Value)
 
-    $scriptPath = Join-Path (Get-ThriveLensProjectRoot) 'scripts\check_resource_budget.ps1'
-    if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
-        throw 'RESOURCE_GATE_UNAVAILABLE'
+    if ($Value -is [enum] -or $Value -is [bool] -or
+        $Value -isnot [sbyte] -and $Value -isnot [byte] -and
+        $Value -isnot [int16] -and $Value -isnot [uint16] -and
+        $Value -isnot [int32] -and $Value -isnot [uint32] -and
+        $Value -isnot [int64] -and $Value -isnot [uint64]) {
+        throw 'RESOURCE_GATE_MANIFEST_INVALID'
     }
-    $output = @(& pwsh -NoProfile -File $scriptPath 2>$null)
-    if ($LASTEXITCODE -ne 0) {
-        throw 'RESOURCE_GATE_FAILED'
+    if ($Value -is [uint64] -and $Value -gt [uint64][int64]::MaxValue) {
+        throw 'RESOURCE_GATE_MANIFEST_INVALID'
     }
-    $text = $output -join [Environment]::NewLine
-    $start = $text.IndexOf('{')
-    $end = $text.LastIndexOf('}')
-    if ($start -lt 0 -or $end -le $start) {
+    try { return [Convert]::ToInt64($Value, [Globalization.CultureInfo]::InvariantCulture) }
+    catch { throw 'RESOURCE_GATE_MANIFEST_INVALID' }
+}
+
+function Read-ThriveLensResourceGateResult {
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+
+    if ($Bytes.Length -lt 2 -or $Bytes.Length -gt 131072 -or
+        ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and
+         $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF)) {
         throw 'RESOURCE_GATE_RESULT_INVALID'
     }
-    try { $result = $text.Substring($start, $end - $start + 1) | ConvertFrom-Json }
-    catch { throw 'RESOURCE_GATE_RESULT_INVALID' }
+    $document = $null
+    try {
+        $options = [Text.Json.JsonDocumentOptions]::new()
+        $options.AllowTrailingCommas = $false
+        $options.CommentHandling = [Text.Json.JsonCommentHandling]::Disallow
+        $options.MaxDepth = 16
+        $document = [Text.Json.JsonDocument]::Parse(
+            [ReadOnlyMemory[byte]]::new($Bytes),
+            $options
+        )
+        if ($document.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+            throw 'RESOURCE_GATE_RESULT_INVALID'
+        }
+        # Reject duplicate names, case aliases, control-bearing strings, and
+        # malformed nested structures before selecting any policy value.
+        Assert-ThriveLensConfigurationJsonElement -Element $document.RootElement
+        $properties = @($document.RootElement.EnumerateObject())
+        $expectedNames = @(
+            'cap_gb','accounted_bytes','accounted_gb','remaining_gb','used_percent',
+            'warning_percent','hard_stop_percent','file_count','roots',
+            'missing_inactive_roots','nested_roots_already_covered','status','phase',
+            'host_free_memory_gb'
+        )
+        if ($properties.Count -ne $expectedNames.Count) {
+            throw 'RESOURCE_GATE_RESULT_INVALID'
+        }
+        for ($index = 0; $index -lt $expectedNames.Count; $index++) {
+            if ([string]$properties[$index].Name -cne $expectedNames[$index]) {
+                throw 'RESOURCE_GATE_RESULT_INVALID'
+            }
+        }
+        foreach ($index in @(0, 2, 3, 4, 5, 6)) {
+            if ($properties[$index].Value.ValueKind -ne [Text.Json.JsonValueKind]::Number) {
+                throw 'RESOURCE_GATE_RESULT_INVALID'
+            }
+        }
+        $accountedBytes = [int64]0
+        if ($properties[1].Value.ValueKind -ne [Text.Json.JsonValueKind]::Number -or
+            -not $properties[1].Value.TryGetInt64([ref]$accountedBytes) -or
+            $accountedBytes -lt 0) {
+            throw 'RESOURCE_GATE_RESULT_INVALID'
+        }
+        $fileCount = [int64]0
+        if ($properties[7].Value.ValueKind -ne [Text.Json.JsonValueKind]::Number -or
+            -not $properties[7].Value.TryGetInt64([ref]$fileCount) -or
+            $fileCount -lt 0) {
+            throw 'RESOURCE_GATE_RESULT_INVALID'
+        }
+        foreach ($index in @(8, 9, 10)) {
+            if ($properties[$index].Value.ValueKind -ne [Text.Json.JsonValueKind]::Array) {
+                throw 'RESOURCE_GATE_RESULT_INVALID'
+            }
+        }
+        if ($properties[11].Value.ValueKind -ne [Text.Json.JsonValueKind]::String -or
+            [string]$properties[11].Value.GetString() -cnotin @('OK', 'WARNING') -or
+            $properties[12].Value.ValueKind -ne [Text.Json.JsonValueKind]::String -or
+            [string]::IsNullOrWhiteSpace([string]$properties[12].Value.GetString()) -or
+            $properties[13].Value.ValueKind -notin @(
+                [Text.Json.JsonValueKind]::Number,
+                [Text.Json.JsonValueKind]::Null
+            )) {
+            throw 'RESOURCE_GATE_RESULT_INVALID'
+        }
+        return [pscustomobject]@{
+            AccountedBytes = $accountedBytes
+            Status = [string]$properties[11].Value.GetString()
+        }
+    }
+    catch {
+        if ([string]$_.Exception.Message -ceq 'RESOURCE_GATE_RESULT_INVALID') { throw }
+        throw 'RESOURCE_GATE_RESULT_INVALID'
+    }
+    finally {
+        if ($null -ne $document) { $document.Dispose() }
+    }
+}
 
-    $manifest = Get-ThriveLensManifest
-    $capBytes = [int64]$manifest.resource_policy.aggregate_cap_bytes
+function Invoke-ThriveLensResourceGate {
+    param(
+        [int64]$ProjectedAdditionalBytes = 0,
+        [AllowNull()]$Manifest
+    )
+
+    $scriptPath = [IO.Path]::GetFullPath([IO.Path]::Combine(
+        (Get-ThriveLensProjectRoot),
+        'scripts',
+        'check_resource_budget.ps1'
+    ))
+    if (-not [IO.File]::Exists($scriptPath)) {
+        throw 'RESOURCE_GATE_UNAVAILABLE'
+    }
+    $pwshPath = [IO.Path]::GetFullPath([IO.Path]::Combine($PSHOME, 'pwsh.exe'))
+    if (-not [IO.File]::Exists($pwshPath)) {
+        throw 'RESOURCE_GATE_UNAVAILABLE'
+    }
+    $process = [Diagnostics.Process]::new()
+    $standardOutputTask = $null
+    $standardErrorTask = $null
+    $budget = [ThriveLens.ResourceGateOutputBudgetV2]::new(131072)
+    $stdoutSink = [ThriveLens.ResourceGateCaptureStreamV2]::new($budget)
+    $stderrSink = [ThriveLens.ResourceGateCaptureStreamV2]::new($budget)
+    $started = $false
+    $readerSetupComplete = $false
+    $runnerFailure = $null
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $startInfo = [Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $pwshPath
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.ArgumentList.Add('-NoProfile')
+        $startInfo.ArgumentList.Add('-NonInteractive')
+        $startInfo.ArgumentList.Add('-File')
+        $startInfo.ArgumentList.Add($scriptPath)
+        $process.StartInfo = $startInfo
+        try {
+            if (-not $process.Start()) { throw 'RESOURCE_GATE_PROCESS_START_FAILED' }
+            $started = $true
+        }
+        catch {
+            if ($_.Exception.Message -ceq 'RESOURCE_GATE_PROCESS_START_FAILED') { throw }
+            throw 'RESOURCE_GATE_PROCESS_START_FAILED'
+        }
+
+        $standardOutputTask = $process.StandardOutput.BaseStream.CopyToAsync($stdoutSink)
+        $standardErrorTask = $process.StandardError.BaseStream.CopyToAsync($stderrSink)
+        $readerSetupComplete = $true
+        while (-not $process.HasExited) {
+            if ($budget.Exceeded) {
+                $runnerFailure = 'RESOURCE_GATE_OUTPUT_LIMIT'
+                break
+            }
+            if ($standardOutputTask.IsFaulted -or $standardOutputTask.IsCanceled -or
+                $standardErrorTask.IsFaulted -or $standardErrorTask.IsCanceled) {
+                $runnerFailure = if ($budget.Exceeded) {
+                    'RESOURCE_GATE_OUTPUT_LIMIT'
+                }
+                else {
+                    'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE'
+                }
+                break
+            }
+            if ($watch.ElapsedMilliseconds -ge 30000) {
+                $runnerFailure = 'RESOURCE_GATE_TIMEOUT'
+                break
+            }
+            [Threading.Thread]::Sleep(10)
+        }
+
+        if ($null -ne $runnerFailure) { throw $runnerFailure }
+        $remainingMilliseconds = [Math]::Max(0, 30000 - [int]$watch.ElapsedMilliseconds)
+        try {
+            if (-not [Threading.Tasks.Task]::WaitAll(
+                @($standardOutputTask, $standardErrorTask),
+                $remainingMilliseconds
+            )) {
+                throw 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE'
+            }
+        }
+        catch {
+            if ($budget.Exceeded) { throw 'RESOURCE_GATE_OUTPUT_LIMIT' }
+            if ($_.Exception.Message -ceq 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE') { throw }
+            throw 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE'
+        }
+        try {
+            $standardOutputTask.GetAwaiter().GetResult()
+            $standardErrorTask.GetAwaiter().GetResult()
+        }
+        catch {
+            if ($budget.Exceeded) { throw 'RESOURCE_GATE_OUTPUT_LIMIT' }
+            throw 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE'
+        }
+        if ($budget.Exceeded) { throw 'RESOURCE_GATE_OUTPUT_LIMIT' }
+        $stdoutBytes = $stdoutSink.ToArray()
+        $stderrBytes = $stderrSink.ToArray()
+        try {
+            if ($process.ExitCode -ne 0) { throw 'RESOURCE_GATE_FAILED' }
+            if ($stderrBytes.Length -ne 0) { throw 'RESOURCE_GATE_RESULT_INVALID' }
+            $result = Read-ThriveLensResourceGateResult -Bytes $stdoutBytes
+        }
+        finally {
+            [Array]::Clear($stdoutBytes, 0, $stdoutBytes.Length)
+            [Array]::Clear($stderrBytes, 0, $stderrBytes.Length)
+        }
+    }
+    catch {
+        $code = [string]$_.Exception.Message
+        $cleanupVerified = -not $started
+        if ($started -and -not $process.HasExited) {
+            try { $process.Kill($true) } catch { }
+            try { $cleanupVerified = $process.WaitForExit(5000) -and $process.HasExited }
+            catch { $cleanupVerified = $false }
+        }
+        elseif ($started) {
+            $cleanupVerified = $process.HasExited
+        }
+        $tasks = @(@($standardOutputTask, $standardErrorTask) | Where-Object { $null -ne $_ })
+        if ($tasks.Count -gt 0) {
+            try {
+                $null = [Threading.Tasks.Task]::WaitAll($tasks, 5000)
+            }
+            catch {
+                # A bounded-output task is expected to fault after enforcing the
+                # shared cap. It is still joined once it reaches a terminal state.
+            }
+            if (@($tasks | Where-Object { -not $_.IsCompleted }).Count -ne 0) {
+                $cleanupVerified = $false
+            }
+        }
+        if ($started -and -not $readerSetupComplete) {
+            $code = 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE'
+        }
+        if (-not $cleanupVerified) { throw 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE' }
+        if ($code -cin @(
+            'RESOURCE_GATE_FAILED','RESOURCE_GATE_PROCESS_START_FAILED',
+            'RESOURCE_GATE_TIMEOUT','RESOURCE_GATE_OUTPUT_LIMIT',
+            'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE','RESOURCE_GATE_RESULT_INVALID'
+        )) { throw $code }
+        throw 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE'
+    }
+    finally {
+        $watch.Stop()
+        $stdoutReaderComplete = $null -eq $standardOutputTask
+        $stderrReaderComplete = $null -eq $standardErrorTask
+        if ($null -ne $standardOutputTask) {
+            try { $stdoutReaderComplete = $standardOutputTask.IsCompleted }
+            catch { $stdoutReaderComplete = $false }
+        }
+        if ($null -ne $standardErrorTask) {
+            try { $stderrReaderComplete = $standardErrorTask.IsCompleted }
+            catch { $stderrReaderComplete = $false }
+        }
+        if ($stdoutReaderComplete) { $stdoutSink.Dispose() }
+        if ($stderrReaderComplete) { $stderrSink.Dispose() }
+        $rootInactive = -not $started
+        if ($started) {
+            try { $rootInactive = $process.HasExited }
+            catch { $rootInactive = $false }
+        }
+        if ($rootInactive -and $stdoutReaderComplete -and $stderrReaderComplete) {
+            $process.Dispose()
+        }
+        $standardOutputTask = $null
+        $standardErrorTask = $null
+    }
+
+    $accountedBytes = [int64]$result.AccountedBytes
+
+    if ($PSBoundParameters.ContainsKey('Manifest')) {
+        try {
+            $manifestValues = @($Manifest)
+            if ($manifestValues.Count -ne 1 -or $null -eq $manifestValues[0] -or
+                $manifestValues[0] -isnot [pscustomobject]) {
+                throw 'RESOURCE_GATE_MANIFEST_INVALID'
+            }
+            $resolvedManifest = $manifestValues[0]
+            $policyProperties = @($resolvedManifest.PSObject.Properties | Where-Object {
+                $_.Name -ceq 'resource_policy'
+            })
+            if ($policyProperties.Count -ne 1 -or $null -eq $policyProperties[0].Value -or
+                $policyProperties[0].Value -isnot [pscustomobject]) {
+                throw 'RESOURCE_GATE_MANIFEST_INVALID'
+            }
+            $resourcePolicy = $policyProperties[0].Value
+            $requiredProperties = @(
+                'aggregate_cap_bytes',
+                'hard_stop_percent',
+                'minimum_free_disk_reserve_bytes'
+            )
+            foreach ($propertyName in $requiredProperties) {
+                $matches = @($resourcePolicy.PSObject.Properties | Where-Object {
+                    $_.Name -ceq $propertyName
+                })
+                if ($matches.Count -ne 1 -or $null -eq $matches[0].Value -or
+                    $matches[0].Value -is [bool] -or
+                    $matches[0].Value -isnot [ValueType]) {
+                    throw 'RESOURCE_GATE_MANIFEST_INVALID'
+                }
+            }
+            $capBytes = ConvertTo-ThriveLensResourcePolicyInt64 -Value $resourcePolicy.aggregate_cap_bytes
+            $hardStopValue = ConvertTo-ThriveLensResourcePolicyInt64 -Value $resourcePolicy.hard_stop_percent
+            $minimumFreeDiskReserveBytes = ConvertTo-ThriveLensResourcePolicyInt64 -Value $resourcePolicy.minimum_free_disk_reserve_bytes
+            if ($hardStopValue -gt [int]::MaxValue) { throw 'RESOURCE_GATE_MANIFEST_INVALID' }
+            $hardStopPercent = [int]$hardStopValue
+            if ($capBytes -le 0 -or $hardStopPercent -le 0 -or
+                $hardStopPercent -ge 100 -or $minimumFreeDiskReserveBytes -lt 0) {
+                throw 'RESOURCE_GATE_MANIFEST_INVALID'
+            }
+        }
+        catch { throw 'RESOURCE_GATE_MANIFEST_INVALID' }
+    }
+    else {
+        $resolvedManifest = Get-ThriveLensManifest
+        $capBytes = [int64]$resolvedManifest.resource_policy.aggregate_cap_bytes
+        $hardStopPercent = [int]$resolvedManifest.resource_policy.hard_stop_percent
+        $minimumFreeDiskReserveBytes = [int64]$resolvedManifest.resource_policy.minimum_free_disk_reserve_bytes
+    }
     $projectedBytes = Assert-ThriveLensProjectedBudget `
-        -AccountedBytes ([int64]$result.accounted_bytes) `
+        -AccountedBytes $accountedBytes `
         -AdditionalBytes $ProjectedAdditionalBytes `
         -CapBytes $capBytes `
-        -HardStopPercent ([int]$manifest.resource_policy.hard_stop_percent)
+        -HardStopPercent $hardStopPercent
 
     $root = Get-ThriveLensAttributableRoot
     $driveName = ([IO.Path]::GetPathRoot($root)).TrimEnd('\').TrimEnd(':')
@@ -409,9 +1338,9 @@ function Invoke-ThriveLensResourceGate {
     $null = Assert-ThriveLensFreeDiskBudget `
         -FreeDiskBytes ([int64]$drive.Free) `
         -AdditionalBytes $ProjectedAdditionalBytes `
-        -ReserveBytes ([int64]$manifest.resource_policy.minimum_free_disk_reserve_bytes)
+        -ReserveBytes $minimumFreeDiskReserveBytes
     return [pscustomobject]@{
-        AccountedBytes = [int64]$result.accounted_bytes
+        AccountedBytes = $accountedBytes
         ProjectedBytes = $projectedBytes
         FreeDiskBytes = [int64]$drive.Free
     }
@@ -768,62 +1697,6 @@ function Read-ThriveLensPostgresBootstrapSecret {
     }
 }
 
-function Resolve-ThriveLensStartChildFailure {
-    param(
-        [Parameter(Mandatory)][int]$ExitCode,
-        [AllowEmptyString()][string]$OutputText = ''
-    )
-    if ($ExitCode -eq 0) {
-        return [pscustomobject]@{ Code = $null; ExitCode = 0 }
-    }
-    if ($ExitCode -eq 3) {
-        $code = if ($OutputText -match '"code"\s*:\s*"POSTGRES_START_CLEANUP_FAILED"') {
-            'POSTGRES_START_CLEANUP_FAILED'
-        }
-        else { 'RUNTIME_START_CHILD_FATAL' }
-        return [pscustomobject]@{ Code = $code; ExitCode = 3 }
-    }
-    return [pscustomobject]@{ Code = 'RUNTIME_START_PROBE_FAILED'; ExitCode = 2 }
-}
-
-function Resolve-ThriveLensRuntimeFailureOutcome {
-    param(
-        [Parameter(Mandatory)][string]$OriginalCode,
-        [Parameter(Mandatory)][ValidateSet(2, 3)][int]$OriginalExitCode,
-        [Parameter(Mandatory)][bool]$StartInvoked,
-        [Parameter(Mandatory)][bool]$CleanupAttempted,
-        [Parameter(Mandatory)][int]$CleanupExitCode,
-        [Parameter(Mandatory)][bool]$AbsenceVerified
-    )
-    if ([string]::IsNullOrWhiteSpace($OriginalCode)) {
-        throw 'RUNTIME_FAILURE_POLICY_INPUT_INVALID'
-    }
-    $cleanupRequired = $StartInvoked
-    $cleanupVerified = -not $cleanupRequired -or
-        ($CleanupAttempted -and $CleanupExitCode -eq 0 -and $AbsenceVerified)
-
-    if (-not $cleanupVerified) {
-        # Preserve a child cleanup fatal exactly; otherwise cleanup uncertainty
-        # escalates an ordinary probe failure to exit 3.
-        $code = if ($OriginalExitCode -eq 3) { $OriginalCode } else { 'RUNTIME_CLEANUP_FAILED' }
-        return [pscustomobject]@{
-            Status = 'ERROR'
-            Code = $code
-            ExitCode = 3
-            CleanupRequired = $cleanupRequired
-            CleanupVerified = $false
-        }
-    }
-
-    return [pscustomobject]@{
-        Status = if ($OriginalExitCode -eq 3) { 'ERROR' } else { 'BLOCKED' }
-        Code = $OriginalCode
-        ExitCode = $OriginalExitCode
-        CleanupRequired = $cleanupRequired
-        CleanupVerified = $cleanupVerified
-    }
-}
-
 function Assert-ThriveLensVersionText {
     param(
         [Parameter(Mandatory)][ValidateSet('postgres', 'pg_ctl', 'initdb', 'pg_isready')][string]$Tool,
@@ -922,6 +1795,12 @@ function Assert-ThriveLensPostgresAbsent {
 Export-ModuleMember -Function @(
     'Get-ThriveLensProjectRoot',
     'Get-ThriveLensManifest',
+    'Enter-ThriveLensConfigurationLease',
+    'Assert-ThriveLensConfigurationLease',
+    'Get-ThriveLensLeasedBackendManifest',
+    'Get-ThriveLensLeasedResourceBudget',
+    'Get-ThriveLensConfigurationLeaseFingerprint',
+    'Exit-ThriveLensConfigurationLease',
     'Get-ThriveLensAttributableRoot',
     'Assert-ThriveLensOwnedPath',
     'Get-ThriveLensPostgresPaths',
@@ -936,8 +1815,6 @@ Export-ModuleMember -Function @(
     'Assert-ThriveLensPathOutsideDirectory',
     'Assert-ThriveLensSecretFileAcl',
     'Read-ThriveLensPostgresBootstrapSecret',
-    'Resolve-ThriveLensStartChildFailure',
-    'Resolve-ThriveLensRuntimeFailureOutcome',
     'Assert-ThriveLensVersionText',
     'Assert-ThriveLensPostgresVersions',
     'Test-ThriveLensPostgresRunning',

@@ -24,63 +24,477 @@ function Get-ArrayArgumentTokenText([Management.Automation.Language.CommandAst]$
  }
  return @()
 }
-function Test-ThriveLensRuntimeInterCycleCallerContract([string]$Source){
- try{
-  $tokens=$null;$parseErrors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($Source,[ref]$tokens,[ref]$parseErrors)
-  if(@($parseErrors).Count -ne 0){return $false}
-  $topLevelTries=@($ast.EndBlock.Statements|Where-Object{$_ -is [Management.Automation.Language.TryStatementAst]})
-  if($topLevelTries.Count -ne 1){return $false}
-  $outerTry=$topLevelTries[0]
-
-  $scriptScopeLockFalseAssignments=@($ast.FindAll({param($node)
-   if($node -isnot [Management.Automation.Language.AssignmentStatementAst] -or $node.Left.Extent.Text -cne '$lockReleaseFailed' -or $node.Right.Extent.Text -cne '$false'){return $false}
-   $ancestor=$node.Parent
-   while($null -ne $ancestor){if($ancestor -is [Management.Automation.Language.FunctionDefinitionAst]){return $false};$ancestor=$ancestor.Parent}
-   return $true
-  },$true))
-  if($scriptScopeLockFalseAssignments.Count -ne 1 -or $scriptScopeLockFalseAssignments[0].Extent.StartOffset -ge $outerTry.Extent.StartOffset){return $false}
-  if(@($outerTry.CatchClauses).Count -ne 1){return $false}
-  $outerCatchLockResets=@($outerTry.CatchClauses[0].Body.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$lockReleaseFailed' -and $node.Right.Extent.Text -ceq '$false'},$true))
-  if($outerCatchLockResets.Count -ne 0){return $false}
-
-  $cycleLoops=@($outerTry.Body.FindAll({param($node)$node -is [Management.Automation.Language.ForEachStatementAst] -and $node.Variable.VariablePath.UserPath -ceq 'cycle' -and $node.Condition.Extent.Text -match '^\s*1\s*\.\.\s*2\s*$'},$true))
-  if($cycleLoops.Count -ne 1){return $false}
-  $cycleLoop=$cycleLoops[0]
-  $startCommands=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'pwsh' -and $node.Extent.Text.IndexOf("'start.ps1'",[StringComparison]::Ordinal) -ge 0},$true))
-  if($startCommands.Count -ne 1 -or $startCommands[0].Extent.StartOffset -le $cycleLoop.Extent.StartOffset -or $startCommands[0].Extent.EndOffset -ge $cycleLoop.Extent.EndOffset){return $false}
-
-  $cycleOneClauses=@()
-  foreach($ifAst in @($cycleLoop.Body.FindAll({param($node)$node -is [Management.Automation.Language.IfStatementAst]},$true))){
-   foreach($clause in @($ifAst.Clauses)){if($clause.Item1.Extent.Text -match '^\s*\$cycle\s*-eq\s*1\s*$'){$cycleOneClauses+=,$clause}}
-  }
-  if($cycleOneClauses.Count -ne 1){return $false}
-  $cycleOneBlock=$cycleOneClauses[0].Item2
-  $cycleOneStatements=@($cycleOneBlock.Statements)
-  $credentialGuards=@($cycleOneStatements|Where-Object{$_ -is [Management.Automation.Language.IfStatementAst] -and $_.Clauses.Count -eq 1 -and $_.Clauses[0].Item1.Extent.Text -match '^\s*-not\s+\$credentialAbsenceVerified\s*$'})
-  if($credentialGuards.Count -ne 1){return $false}
-  $credentialThrows=@($credentialGuards[0].Clauses[0].Item2.FindAll({param($node)$node -is [Management.Automation.Language.ThrowStatementAst]},$true))
-  if($credentialThrows.Count -ne 1 -or $credentialThrows[0].Extent.Text -notmatch "^\s*throw\s+'AUTH_FILE_CLEANUP_ABSENCE_UNVERIFIED'\s*$"){return $false}
-
-  $boundaryAssignments=@($cycleOneStatements|Where-Object{$_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq '$interCycleBoundary' -and $_.Right.Extent.Text -match '^\s*Invoke-ThriveLensInterCycleBoundary(?:\s|`r|`n)'})
-  $cumulativeAssignments=@($cycleOneStatements|Where-Object{$_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Extent.Text -match '^\s*\$lockReleaseFailed\s*=\s*\$lockReleaseFailed\s*-or\s*\[bool\]\s*\$interCycleBoundary\.LockReleaseFailed\s*$'})
-  $failureGuards=@($cycleOneStatements|Where-Object{$_ -is [Management.Automation.Language.IfStatementAst] -and $_.Clauses.Count -eq 1 -and $_.Clauses[0].Item1.Extent.Text -match '^\s*-not\s+\[bool\]\s*\$interCycleBoundary\.Continue\s*$'})
-  $cycleContinues=@($cycleLoop.Body.FindAll({param($node)$node -is [Management.Automation.Language.ContinueStatementAst]},$true))
-  if($boundaryAssignments.Count -ne 1 -or $cumulativeAssignments.Count -ne 1 -or $failureGuards.Count -ne 1 -or $cycleContinues.Count -ne 1){return $false}
-  $failureThrows=@($failureGuards[0].Clauses[0].Item2.FindAll({param($node)$node -is [Management.Automation.Language.ThrowStatementAst]},$true))
-  if($failureThrows.Count -ne 1 -or $failureThrows[0].Extent.Text -notmatch '^\s*throw\s+\[string\]\s*\$interCycleBoundary\.OriginalCode\s*$'){return $false}
-  $continue=$cycleContinues[0]
-  if($continue.Extent.StartOffset -le $cycleOneBlock.Extent.StartOffset -or $continue.Extent.EndOffset -ge $cycleOneBlock.Extent.EndOffset){return $false}
-  return ($credentialGuards[0].Extent.StartOffset -lt $boundaryAssignments[0].Extent.StartOffset -and
-   $boundaryAssignments[0].Extent.StartOffset -lt $cumulativeAssignments[0].Extent.StartOffset -and
-   $cumulativeAssignments[0].Extent.StartOffset -lt $failureGuards[0].Extent.StartOffset -and
-   $failureGuards[0].Extent.StartOffset -lt $continue.Extent.StartOffset)
+function Get-ThriveLensParsedSource([string]$Source){
+ $tokens=$null;$parseErrors=$null
+ $ast=[Management.Automation.Language.Parser]::ParseInput($Source,[ref]$tokens,[ref]$parseErrors)
+ return [pscustomobject]@{Ast=$ast;Tokens=@($tokens);Errors=@($parseErrors)}
+}
+function Test-ThriveLensSourceParses([string]$Source){
+ try{$parsed=Get-ThriveLensParsedSource -Source $Source;return $parsed.Errors.Count -eq 0}catch{return $false}
+}
+function Get-ThriveLensFunctionAst([Management.Automation.Language.Ast]$Ast,[string]$Name){
+ $functions=@($Ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $Name},$true))
+ if($functions.Count -ne 1){return $null}
+ return $functions[0]
+}
+function Get-ThriveLensCommandAsts([Management.Automation.Language.Ast]$Ast,[string]$Name){
+ $commands=@($Ast.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq $Name},$true)|Sort-Object {$_.Extent.StartOffset})
+ Write-Output -NoEnumerate $commands
+}
+function Test-ThriveLensAstHasAncestor([Management.Automation.Language.Ast]$Node,[type]$Type,[scriptblock]$Predicate){
+ $ancestor=$Node.Parent
+ while($null -ne $ancestor){
+  if($ancestor -is $Type -and (& $Predicate $ancestor)){return $true}
+  $ancestor=$ancestor.Parent
  }
- catch{return $false}
+ return $false
+}
+function Test-ThriveLensStartCoreContract([string]$Source){
+ try{
+  $parsed=Get-ThriveLensParsedSource -Source $Source
+  if($parsed.Errors.Count -ne 0 -or $Source -match 'Resolve-ThriveLens(?:ChildOutcome|StartChildExit|PreTokenStartObservation|StartChildFailure)'){return $false}
+  $core=Get-ThriveLensFunctionAst -Ast $parsed.Ast -Name 'Invoke-ThriveLensPostgresStartUnderLock'
+  if($null -eq $core){return $false}
+  $parameters=@($core.Body.ParamBlock.Parameters|ForEach-Object{$_.Name.VariablePath.UserPath})
+  if(($parameters -join ',') -cne 'ConfigurationLease,IdentityToken,LifecycleLock,WslTouched,StartAttempted,StartCommitResourceGateVerified'){return $false}
+  $expected=@(
+   'Assert-ThriveLensLifecycleLockOwnership','Assert-ThriveLensConfigurationLease','Get-ThriveLensConfigurationLeaseFingerprint',
+   'Get-ThriveLensWslContract','Get-ThriveLensLeasedResourceBudget','Get-ThriveLensWslPaths','Invoke-ThriveLensResourceGate',
+   'Get-ThriveLensFreeMemoryBytes','Assert-ThriveLensWslIdentity','Assert-ThriveLensWslPackages','Assert-ThriveLensWslInternalDisk',
+   'Get-ThriveLensWslClusterState','Assert-ThriveLensLinuxPathPolicy','Assert-ThriveLensWslAbsent','Assert-ThriveLensHostPortAbsent',
+   'Get-ThriveLensFreeMemoryBytes','Assert-ThriveLensConfigurationLease','Get-ThriveLensConfigurationLeaseFingerprint','Assert-ThriveLensWslIdentity',
+   'Invoke-ThriveLensGuardedDistro','Assert-ThriveLensWslLoopback','Assert-ThriveLensHostLoopback','Invoke-ThriveLensResourceGate'
+  )
+  $expectedNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach($name in $expected){$null=$expectedNames.Add($name)}
+  $observed=@($core.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $null -ne $node.GetCommandName() -and $expectedNames.Contains($node.GetCommandName())},$true)|Sort-Object {$_.Extent.StartOffset}|ForEach-Object{$_.GetCommandName()})
+  if(($observed -join ',') -cne ($expected -join ',')){return $false}
+  $coreText=$core.Extent.Text
+  if($coreText -match '(?i)pwsh(?:\.exe)?|Start-Process|preflight\.ps1|Get-ThriveLensManifest|1073741824'){return $false}
+  if($coreText -notmatch '\$leasedManifest\.resource_policy\.runtime_minimum_free_memory_bytes' -or
+     $coreText -notmatch '\$activePhase\s*=\s*\[string\]\$leasedResourceBudget\.phase' -or
+     $coreText -notmatch 'allowed_active_phases\)\s*-cnotcontains\s+\$activePhase' -or
+     $coreText -notmatch 'Get-ThriveLensWslContract\s+-ConfigurationLease\s+\$ConfigurationLease' -or
+     $coreText -notmatch 'Get-ThriveLensWslPaths\s+-Contract\s+\$leasedContract'){return $false}
+  $memoryGuards=@($core.FindAll({param($node)
+   if($node -isnot [Management.Automation.Language.IfStatementAst]){return $false}
+   foreach($clause in @($node.Clauses)){if($clause.Item1.Extent.Text -match '^\s*\$freeMemoryBytes\s*-lt\s*\$runtimeMinimumBytes\s*$'){return $true}}
+   return $false
+  },$true))
+  if($memoryGuards.Count -ne 2){return $false}
+  $wslFlags=@($core.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$WslTouched.Value' -and $node.Right.Extent.Text -ceq '$true'},$true))
+  $attemptFlags=@($core.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$StartAttempted.Value' -and $node.Right.Extent.Text -ceq '$true'},$true))
+  $startAssignments=@($core.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$startResult' -and $node.Right.Extent.Text -match '^\s*Invoke-ThriveLensGuardedDistro(?:\s|`)'} ,$true))
+  $identityCalls=Get-ThriveLensCommandAsts -Ast $core -Name 'Assert-ThriveLensWslIdentity'
+  $guardedCalls=Get-ThriveLensCommandAsts -Ast $core -Name 'Invoke-ThriveLensGuardedDistro'
+  if($wslFlags.Count -ne 1 -or $attemptFlags.Count -ne 1 -or $startAssignments.Count -ne 1 -or $identityCalls.Count -ne 2 -or $guardedCalls.Count -ne 1){return $false}
+  $wslGap=$Source.Substring($wslFlags[0].Extent.EndOffset,$identityCalls[0].Extent.StartOffset-$wslFlags[0].Extent.EndOffset)
+  $attemptGap=$Source.Substring($attemptFlags[0].Extent.EndOffset,$startAssignments[0].Extent.StartOffset-$attemptFlags[0].Extent.EndOffset)
+  if($wslGap -notmatch '^\s*\$null\s*=\s*$' -or -not [string]::IsNullOrWhiteSpace($attemptGap) -or $attemptFlags[0].Extent.StartOffset -gt $guardedCalls[0].Extent.StartOffset){return $false}
+  $startTokens=@("'/usr/sbin/runuser'","'-u'","'postgres'","'--'",'$paths.PgCtl',"'start'","'-D'",'$paths.DataRoot',"'-l'","'/dev/null'","'-o'",'$options',"'-w'","'-t'","'30'")
+  if(((Get-ArrayArgumentTokenText -Command $guardedCalls[0] -ParameterName 'Arguments')-join "`n") -cne ($startTokens-join "`n")){return $false}
+  foreach($boundName in @('Assert-ThriveLensWslIdentity','Assert-ThriveLensWslPackages','Assert-ThriveLensWslInternalDisk','Get-ThriveLensWslClusterState','Assert-ThriveLensLinuxPathPolicy','Assert-ThriveLensWslAbsent','Assert-ThriveLensWslLoopback')){
+   foreach($call in @(Get-ThriveLensCommandAsts -Ast $core -Name $boundName)){
+    if($call.Extent.Text -notmatch '-Contract\s+\$leasedContract' -or $call.Extent.Text -notmatch '-IdentityToken\s+\$IdentityToken' -or $call.Extent.Text -notmatch '-LifecycleLock\s+\$LifecycleLock'){return $false}
+   }
+  }
+  foreach($hostName in @('Assert-ThriveLensHostPortAbsent','Assert-ThriveLensHostLoopback')){
+   foreach($call in @(Get-ThriveLensCommandAsts -Ast $core -Name $hostName)){if($call.Extent.Text -notmatch '-Paths\s+\$paths' -or $call.Extent.Text -notmatch '-Contract\s+\$leasedContract'){return $false}}
+  }
+  foreach($gate in @(Get-ThriveLensCommandAsts -Ast $core -Name 'Invoke-ThriveLensResourceGate')){if($gate.Extent.Text -notmatch '-Manifest\s+\$leasedManifest'){return $false}}
+  $postGateFalse=@($core.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$StartCommitResourceGateVerified.Value' -and $node.Right.Extent.Text -ceq '$false'},$true))
+  $postGateTrue=@($core.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$StartCommitResourceGateVerified.Value' -and $node.Right.Extent.Text -ceq '$true'},$true))
+  $gates=Get-ThriveLensCommandAsts -Ast $core -Name 'Invoke-ThriveLensResourceGate'
+  if($postGateFalse.Count -ne 1 -or $postGateTrue.Count -ne 1 -or $gates.Count -ne 2 -or
+     $postGateFalse[0].Extent.StartOffset -gt $gates[0].Extent.StartOffset -or
+     $postGateTrue[0].Extent.StartOffset -lt $gates[1].Extent.EndOffset){return $false}
+  $postGateGap=$Source.Substring($gates[1].Extent.EndOffset,$postGateTrue[0].Extent.StartOffset-$gates[1].Extent.EndOffset)
+  if($postGateGap -notmatch '^\s*\}\s*catch\s*\{[\s\S]*\}\s*$'){return $false}
+  return ($guardedCalls[0].Extent.Text -match '-IdentityToken\s+\$IdentityToken' -and $guardedCalls[0].Extent.Text -match '-LifecycleLock\s+\$LifecycleLock' -and $guardedCalls[0].Extent.Text -match '-Contract\s+\$leasedContract' -and $guardedCalls[0].Extent.Text -match '-TimeoutSeconds\s+45')
+ }catch{return $false}
+}
+function Test-ThriveLensWslRunnerContract([string]$Source){
+ try{
+  $parsed=Get-ThriveLensParsedSource -Source $Source
+  if($parsed.Errors.Count -ne 0){return $false}
+  $function=Get-ThriveLensFunctionAst -Ast $parsed.Ast -Name 'Invoke-ThriveLensWsl'
+  if($null -eq $function){return $false}
+  $body=$function.Extent.Text
+  return ($body -match '\$timeoutMilliseconds=\[Math\]::BigMul\(\[int\]\$TimeoutSeconds,1000\)' -and
+   $body -match '\$stopwatch=\[Diagnostics\.Stopwatch\]::StartNew\(\)' -and $body -notmatch 'DateTime|UtcNow' -and
+   @([regex]::Matches($body,'\$timeoutMilliseconds-\$stopwatch\.ElapsedMilliseconds')).Count -eq 2 -and
+   $body -match '\$stdinBytes\.Length\s*-gt\s*512' -and $body -match '\[Array\]::Clear\(\$stdinBytes,0,\$stdinBytes\.Length\)' -and
+   $body -match '\$stdinWriteTask=\$process\.StandardInput\.BaseStream\.WriteAsync' -and $body -match '\$stdinFlushTask=\$process\.StandardInput\.BaseStream\.FlushAsync' -and
+   $body -match '\$failureCode=if\(-not \$started\)\{''WSL_PROCESS_START_FAILED''\}' -and
+   $body -match '\$cleanupProven=\$true\s+if\(\$started\)\{' -and
+   $body -match 'if\(-not \$process\.HasExited\)\{\$process\.Kill\(\$true\)\}' -and $body -match '\$rootReaped=\$process\.WaitForExit\(5000\)' -and
+   $body -match 'if\(\$rootReaped\)\{\$rootReaped=\$process\.HasExited\}' -and
+   $body -match 'if\(-not \$rootReaped\)\{\$cleanupProven=\$false\}' -and
+   $body -match 'foreach\(\$ioTask in @\(\$stdoutTask,\$stderrTask,\$stdinWriteTask,\$stdinFlushTask\)\)' -and
+   $body -match 'if\(\$null -eq \$ioTask\)\{continue\}' -and $body -match '\$ioTask\.Wait\(5000\)' -and
+   $body -match 'if\(-not \$ioTask\.IsCompleted\)\{\$cleanupProven=\$false\}' -and
+   $body -match 'if\(-not \$cleanupProven\)\{throw ''WSL_OUTPUT_DRAIN_INCOMPLETE''\}' -and
+   $body -match 'if\(\$stdoutComplete\)\{\$stdoutSink\.Dispose\(\)\}' -and $body -match 'if\(\$stderrComplete\)\{\$stderrSink\.Dispose\(\)\}' -and
+   $body -match 'if\(\$started\)\{try\{\$rootInactive=\$process\.HasExited\}' -and
+   $body -match 'if\(\$rootInactive -and \$stdoutComplete -and \$stderrComplete -and \$stdinWriteComplete -and \$stdinFlushComplete\)\{\$process\.Dispose\(\)\}')
+ }catch{return $false}
+}
+function Test-ThriveLensWslSecurityTypeContract([string]$Source){
+ try{
+  $parsed=Get-ThriveLensParsedSource -Source $Source
+  if($parsed.Errors.Count -ne 0){return $false}
+  return ($Source -match "\`$wslSecurityTypeNames=@\(\s*'ThriveLens\.WslSecurityV2\.OutputBudget',\s*'ThriveLens\.WslSecurityV2\.BoundedCaptureStream',\s*'ThriveLens\.WslSecurityV2\.HostFileIdentity',\s*'ThriveLens\.WslSecurityV2\.MutexOwnershipVerifier'\s*\)" -and
+   @([regex]::Matches($Source,'public const int ContractVersion=2;')).Count -eq 4 -and
+   $Source -match '\$existingWslSecurityTypes\.Count\s*-eq\s*0' -and $Source -match '\$existingWslSecurityTypes\.Count\s*-ne\s*\$wslSecurityTypeNames\.Count' -and
+   $Source -match '\$versionField\.IsLiteral' -and $Source -match 'GetRawConstantValue\(\)\s*-ne\s*2' -and
+   $Source -match '\$attestationBudget=\[ThriveLens\.WslSecurityV2\.OutputBudget\]::new\(8\)' -and
+   $Source -match '\$attestationSink\.Length\s*-ne\s*8' -and $Source -match "\(\`$preserved\s*-join\s*','\)\s*-cne\s*'1,2,3,4,5,6,7,8'" -and
+   $Source -match 'if\(total>budget\.Limit\)\{budget\.Exceeded=true;throw new IOException\("OUTPUT_LIMIT"\);\}data\.Write\(buffer,offset,count\);')
+ }catch{return $false}
+}
+function Test-ThriveLensStartAdapterContract([string]$Source){
+ try{
+  $parsed=Get-ThriveLensParsedSource -Source $Source
+  if($parsed.Errors.Count -ne 0 -or $Source -match 'Resolve-ThriveLens(?:ChildOutcome|StartChildExit|PreTokenStartObservation|StartChildFailure)' -or $Source -match '(?i)pwsh(?:\.exe)?\s+.*(?:preflight|start)\.ps1|Start-Process|Get-ThriveLensManifest'){return $false}
+  $coreCalls=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Invoke-ThriveLensPostgresStartUnderLock'
+  $locks=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Enter-ThriveLensLifecycleLock'
+  $leases=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Enter-ThriveLensConfigurationLease'
+  $contracts=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Get-ThriveLensWslContract'
+  $paths=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Get-ThriveLensWslPaths'
+  $tokens=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Get-ThriveLensWslCleanupIdentityToken'
+  if($coreCalls.Count -ne 1 -or $locks.Count -ne 1 -or $leases.Count -ne 1 -or $contracts.Count -ne 1 -or $paths.Count -ne 1 -or $tokens.Count -ne 1){return $false}
+  if(-not ($locks[0].Extent.StartOffset -lt $leases[0].Extent.StartOffset -and $leases[0].Extent.StartOffset -lt $contracts[0].Extent.StartOffset -and
+      $contracts[0].Extent.StartOffset -lt $paths[0].Extent.StartOffset -and $paths[0].Extent.StartOffset -lt $tokens[0].Extent.StartOffset -and
+      $tokens[0].Extent.StartOffset -lt $coreCalls[0].Extent.StartOffset)){return $false}
+  if($contracts[0].Extent.Text -notmatch '-ConfigurationLease\s+\$configurationLease' -or
+     $paths[0].Extent.Text -notmatch '-Contract\s+\$leasedContract' -or
+     $tokens[0].Extent.Text -notmatch '-Contract\s+\$leasedContract'){return $false}
+  if(Test-ThriveLensAstHasAncestor -Node $coreCalls[0] -Type ([Management.Automation.Language.LoopStatementAst]) -Predicate {param($node)$true}){return $false}
+  $coreText=$coreCalls[0].Extent.Text
+  foreach($binding in @('-ConfigurationLease\s+\$configurationLease','-IdentityToken\s+\$cleanupIdentityToken','-LifecycleLock\s+\$lifecycleLock','-WslTouched\s+\(\[ref\]\$wslTouched\)','-StartAttempted\s+\(\[ref\]\$attempted\)','-StartCommitResourceGateVerified\s+\(\[ref\]\$startCommitResourceGateVerified\)')){if($coreText -notmatch $binding){return $false}}
+  if((Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Invoke-ThriveLensGuardedDistro').Count -ne 0){return $false}
+  $stops=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Stop-ThriveLensPostgresUnderLock'
+  $forces=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Stop-ThriveLensDistroAndVerify'
+  if($stops.Count -ne 1 -or $forces.Count -ne 1 -or $forces[0].Extent.StartOffset -lt $stops[0].Extent.StartOffset){return $false}
+   if($Source -notmatch 'if\s*\(\s*-not\s+\$resourceGateOutputDrainIncomplete\s*-and\s*\$sameTokenAuthority\s*-and\s*\$cleanupLeaseValid\s*-and\s*\$guestCleanupAllowed\s*-and\s*\$attempted\)' -or
+     $Source -notmatch 'if\s*\(\$cleanupRequired\s*-and\s*\$null\s*-ne\s*\$lifecycleLock\s*-and\s*\$null\s*-ne\s*\$cleanupIdentityToken\)' -or
+     $Source -notmatch 'if\s*\(\$forcedTerminationAuthorized\)'){return $false}
+  foreach($cleanupCall in @($stops)+@($forces)){if($cleanupCall.Extent.Text -notmatch '-IdentityToken\s+\$cleanupIdentityToken' -or $cleanupCall.Extent.Text -notmatch '-LifecycleLock\s+\$lifecycleLock' -or $cleanupCall.Extent.Text -notmatch '-Contract\s+\$leasedContract'){return $false}}
+  if($stops[0].Extent.Text -notmatch '-Paths\s+\$leasedPaths'){return $false}
+  foreach($boundName in @('Assert-ThriveLensWslCleanupIdentity','Assert-ThriveLensDistroStopped')){
+   foreach($call in @(Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name $boundName)){if($call.Extent.Text -notmatch '-Contract\s+\$leasedContract'){return $false}}
+  }
+  foreach($call in @(Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Assert-ThriveLensHostPortAbsent')){
+   if($call.Extent.Text -notmatch '-Contract\s+\$leasedContract' -or $call.Extent.Text -notmatch '-Paths\s+\$leasedPaths'){return $false}
+  }
+  $absenceAssignments=@($parsed.Ast.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$absenceObservationAuthorized'},$true))
+  $absenceGuards=@($parsed.Ast.FindAll({param($node)
+   if($node -isnot [Management.Automation.Language.IfStatementAst]){return $false}
+   foreach($clause in @($node.Clauses)){if($clause.Item1.Extent.Text -match '^\s*\$absenceObservationAuthorized\s*$'){return $true}}
+   return $false
+  },$true))
+  $distroAbsenceCalls=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Assert-ThriveLensDistroStopped'
+  $hostAbsenceCalls=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Assert-ThriveLensHostPortAbsent'
+  if($absenceAssignments.Count -ne 1 -or $absenceGuards.Count -ne 1 -or $distroAbsenceCalls.Count -ne 1 -or $hostAbsenceCalls.Count -ne 1 -or
+     $absenceAssignments[0].Right.Extent.Text -notmatch '^\s*\$null\s*-ne\s*\$leasedContract\s*-and\s*\$null\s*-ne\s*\$leasedPaths\s*-and\s*\(\s*\$forcedTerminationAuthorized\s*-or\s*-not\s*\$cleanupRequired\s*\)\s*$' -or
+     $absenceAssignments[0].Extent.StartOffset -gt $absenceGuards[0].Extent.StartOffset -or
+     $distroAbsenceCalls[0].Extent.StartOffset -lt $absenceGuards[0].Extent.StartOffset -or $distroAbsenceCalls[0].Extent.EndOffset -gt $absenceGuards[0].Extent.EndOffset -or
+     $hostAbsenceCalls[0].Extent.StartOffset -lt $absenceGuards[0].Extent.StartOffset -or $hostAbsenceCalls[0].Extent.EndOffset -gt $absenceGuards[0].Extent.EndOffset){return $false}
+  $adapterGates=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Invoke-ThriveLensResourceGate'
+  if($adapterGates.Count -ne 1 -or $adapterGates[0].Extent.Text -notmatch '-Manifest\s+\$leasedContract\.Manifest' -or
+     $forces[0].Extent.StartOffset -gt $adapterGates[0].Extent.StartOffset -or
+     $hostAbsenceCalls[0].Extent.StartOffset -gt $adapterGates[0].Extent.StartOffset -or
+      $Source -notmatch 'if\s*\(\$attempted\)' -or $Source -notmatch 'if\s*\(\$attempted\)\s*\{\s*\$finalResourceGateVerified\s*=\s*\$false\s*\}' -or
+      $Source -notmatch '\$resourceGateOutputDrainIncomplete\s*=\s*\$originalCode\s*-ceq\s*''RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE''' -or
+      $Source -notmatch 'if\s*\(\$resourceGateOutputDrainIncomplete\)\s*\{[\s\S]*?\$finalResourceGateFailed\s*=\s*\$true\s*\}' -or
+      $Source -notmatch '\$cleanupVerified\s*=\s*\$distroAbsent\s*-and\s*\$hostAbsent[\s\S]+?-not\s+\$resourceGateOutputDrainIncomplete' -or
+      $Source -notmatch 'if\s*\(\$attempted\s*-and\s*-not\s+\$resourceGateOutputDrainIncomplete\)' -or
+     $Source -notmatch 'if\s*\(\$cleanupLeaseValid\s*-and\s*\$null\s*-ne\s*\$leasedContract\)' -or
+     $Source -notmatch '\$finalResourceGateFailed\s*=\s*\$true'){return $false}
+  $lockFalse=@($parsed.Ast.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$lockReleaseFailed' -and $node.Right.Extent.Text -ceq '$false'},$true))
+  $leaseFalse=@($parsed.Ast.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$leaseReleaseFailed' -and $node.Right.Extent.Text -ceq '$false'},$true))
+  $validationAssignments=@($parsed.Ast.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$expectedValidationCodes'},$true))
+  if($lockFalse.Count -ne 1 -or $leaseFalse.Count -ne 1 -or $validationAssignments.Count -ne 1 -or $validationAssignments[0].Extent.Text -match 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE'){return $false}
+  $leaseExits=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Exit-ThriveLensConfigurationLease';$lockExits=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Exit-ThriveLensLifecycleLock'
+  if($leaseExits.Count -ne 2 -or $lockExits.Count -ne 2){return $false}
+  $successAssert=$Source.IndexOf('Assert-ThriveLensConfigurationLease -Lease $configurationLease',$coreCalls[0].Extent.EndOffset,[StringComparison]::Ordinal)
+  $successLeaseAttempt=$Source.IndexOf('$leaseReleaseAttempted = $true',$successAssert,[StringComparison]::Ordinal)
+  $successLease=$leaseExits[0].Extent.StartOffset;$successLeaseReleased=$Source.IndexOf('$leaseReleased = $true',$successLease,[StringComparison]::Ordinal)
+  $successLeaseClear=$Source.IndexOf('$configurationLease = $null',$successLeaseReleased,[StringComparison]::Ordinal)
+  $successLockAttempt=$Source.IndexOf('$lockReleaseAttempted = $true',$successLeaseClear,[StringComparison]::Ordinal)
+  $successLock=$lockExits[0].Extent.StartOffset;$successLockReleased=$Source.IndexOf('$lockReleased = $true',$successLock,[StringComparison]::Ordinal)
+  $successTokenClear=$Source.IndexOf('$cleanupIdentityToken = $null',$successLockReleased,[StringComparison]::Ordinal)
+  $startedResponse=$Source.IndexOf("status = 'STARTED'",$successTokenClear,[StringComparison]::Ordinal)
+  if(-not ($successAssert -gt $coreCalls[0].Extent.EndOffset -and $successAssert -lt $successLeaseAttempt -and $successLeaseAttempt -lt $successLease -and $successLease -lt $successLeaseReleased -and $successLeaseReleased -lt $successLeaseClear -and $successLeaseClear -lt $successLockAttempt -and $successLockAttempt -lt $successLock -and $successLock -lt $successLockReleased -and $successLockReleased -lt $successTokenClear -and $successTokenClear -lt $startedResponse)){return $false}
+  if($adapterGates[0].Extent.StartOffset -gt $leaseExits[1].Extent.StartOffset -or $leaseExits[1].Extent.StartOffset -gt $lockExits[1].Extent.StartOffset -or
+     $Source -notmatch 'if\s*\(\$null\s*-ne\s*\$configurationLease\s*-and\s*-not\s+\$leaseReleaseAttempted\)' -or
+     $Source -notmatch 'if\s*\(\$null\s*-ne\s*\$lifecycleLock\s*-and\s*-not\s+\$lockReleaseAttempted\)'){return $false}
+  return ($Source -match '\$fatal\s*=\s*\$startSucceeded\s*-or\s*\$attempted' -and
+   $Source -match "'RESOURCE_GATE_FAILED'[\s\S]+?'RESOURCE_GATE_UNAVAILABLE'[\s\S]+?'RESOURCE_GATE_RESULT_INVALID'[\s\S]+?'RESOURCE_GATE_MANIFEST_INVALID'[\s\S]+?'RESOURCE_GATE_PROCESS_START_FAILED'[\s\S]+?'RESOURCE_GATE_TIMEOUT'[\s\S]+?'RESOURCE_GATE_OUTPUT_LIMIT'[\s\S]+?'WSL_STANDARD_INPUT_INVALID'[\s\S]+?'WSL_STANDARD_INPUT_LIMIT_EXCEEDED'" -and
+   $Source -match 'port\s*=\s*\[int\]\$leasedPaths\.Port' -and $Source -notmatch 'port\s*=\s*55432' -and
+   $Source -match 'if\s*\(\$resourceGateOutputDrainIncomplete\s*-and\s*-not\s+\$attempted\)[\s\S]+RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE[\s\S]+elseif\s*\(\$finalResourceGateFailed\)[\s\S]+POST_MUTATION_RESOURCE_GATE_FAILED[\s\S]+elseif\s*\(\$lockReleaseFailed\)' -and
+   $Source -match '\$lockReleaseFailed\s*-or\s*\$leaseReleaseFailed' -and
+   $Source -match 'elseif \(\$lockReleaseFailed\)[\s\S]+POSTGRES_START_LOCK_RELEASE_FAILED[\s\S]+elseif \(\$leaseReleaseFailed\)[\s\S]+POSTGRES_START_CONFIGURATION_LEASE_RELEASE_FAILED' -and
+   $Source -match 'guest_cleanup_attempted\s*=\s*\$guestCleanupAttempted' -and
+   $Source -match 'forced_termination_attempted\s*=\s*\$forcedTerminationAttempted' -and
+   $Source -match 'configuration_lease_release_attempted\s*=\s*\$leaseReleaseAttempted' -and
+   $Source -match 'lifecycle_lock_release_attempted\s*=\s*\$lockReleaseAttempted' -and
+   $Source -match 'post_mutation_resource_gate_verified\s*=\s*\$finalResourceGateVerified\s*-and\s*-not\s*\$finalResourceGateFailed')
+ }catch{return $false}
+}
+function Test-ThriveLensRuntimeAdapterContract([string]$Source){
+ try{
+  $parsed=Get-ThriveLensParsedSource -Source $Source
+  if($parsed.Errors.Count -ne 0 -or $Source -match 'Resolve-ThriveLens(?:ChildOutcome|StartChildExit|PreTokenStartObservation|StartChildFailure)' -or $Source -match '(?i)pwsh(?:\.exe)?\s+.*(?:preflight|start|stop)\.ps1|Start-Process|Get-ThriveLensManifest'){return $false}
+  $cycles=@($parsed.Ast.FindAll({param($node)$node -is [Management.Automation.Language.ForEachStatementAst] -and $node.Variable.VariablePath.UserPath -ceq 'cycle' -and $node.Condition.Extent.Text -match '^\s*1\s*\.\.\s*2\s*$'},$true))
+  $cores=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Invoke-ThriveLensPostgresStartUnderLock'
+  $contracts=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Get-ThriveLensWslContract'
+  $paths=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Get-ThriveLensWslPaths'
+  $tokens=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Get-ThriveLensWslCleanupIdentityToken'
+  if($cycles.Count -ne 1 -or $cores.Count -ne 1 -or $contracts.Count -ne 1 -or $paths.Count -ne 1 -or $tokens.Count -ne 1){return $false}
+  $cycle=$cycles[0]
+  foreach($call in @($cores)+@($contracts)+@($paths)+@($tokens)){if($call.Extent.StartOffset -le $cycle.Extent.StartOffset -or $call.Extent.EndOffset -ge $cycle.Extent.EndOffset){return $false}}
+  $lockIndex=$Source.IndexOf('$probeLifecycleLock = Enter-ThriveLensLifecycleLock',$cycle.Extent.StartOffset,[StringComparison]::Ordinal)
+  $leaseIndex=$Source.IndexOf('$configurationLease = Enter-ThriveLensConfigurationLease',$lockIndex,[StringComparison]::Ordinal)
+  $contractIndex=$contracts[0].Extent.StartOffset;$pathsIndex=$paths[0].Extent.StartOffset;$tokenIndex=$tokens[0].Extent.StartOffset;$coreIndex=$cores[0].Extent.StartOffset
+  if($cores[0].Extent.Text -notmatch '-StartCommitResourceGateVerified\s+\(\[ref\]\$startCommitResourceGateVerified\)'){return $false}
+  $firstProbe=$Source.IndexOf('Assert-ThriveLensClusterScramConfig',$coreIndex,[StringComparison]::Ordinal)
+  $identityProbe=$Source.IndexOf('Get-ThriveLensPrivateClusterIdentityFingerprint',$firstProbe,[StringComparison]::Ordinal)
+  $successStop=$Source.IndexOf('Stop-ThriveLensPostgresUnderLock -IdentityToken $probeIdentityToken',$firstProbe,[StringComparison]::Ordinal)
+  $successForce=$Source.IndexOf('Stop-ThriveLensDistroAndVerify -IdentityToken $probeIdentityToken',$successStop,[StringComparison]::Ordinal)
+  $successDistroAbsence=$Source.IndexOf('Assert-ThriveLensDistroStopped -Contract $leasedContract',$successForce,[StringComparison]::Ordinal)
+  $successHostAbsence=$Source.IndexOf('Assert-ThriveLensHostPortAbsent -Paths $leasedPaths -Contract $leasedContract',$successDistroAbsence,[StringComparison]::Ordinal)
+  $successFinalGate=$Source.IndexOf('Invoke-ThriveLensResourceGate -Manifest $manifest',$successHostAbsence,[StringComparison]::Ordinal)
+  $completed=$Source.IndexOf('$completedCycles++',$successForce,[StringComparison]::Ordinal)
+  $releaseLease=$Source.IndexOf('Exit-ThriveLensConfigurationLease -Lease $configurationLease',$completed,[StringComparison]::Ordinal)
+  $clearLease=$Source.IndexOf('$configurationLease = $null',$releaseLease,[StringComparison]::Ordinal)
+  $releaseLock=$Source.IndexOf('Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock',$clearLease,[StringComparison]::Ordinal)
+  $clearToken=$Source.IndexOf('$probeIdentityToken = $null',$releaseLock,[StringComparison]::Ordinal)
+  $settle=$Source.IndexOf('Wait-ThriveLensInterCycleMemorySettle -MinimumFreeMemoryBytes $minimumFreeMemoryBytes',$clearToken,[StringComparison]::Ordinal)
+  if(-not ($lockIndex -ge 0 -and $lockIndex -lt $leaseIndex -and $leaseIndex -lt $contractIndex -and $contractIndex -lt $pathsIndex -and $pathsIndex -lt $tokenIndex -and $tokenIndex -lt $coreIndex -and $coreIndex -lt $firstProbe -and $firstProbe -lt $identityProbe -and $identityProbe -lt $successStop -and $successStop -lt $successForce -and $successForce -lt $successDistroAbsence -and $successDistroAbsence -lt $successHostAbsence -and $successHostAbsence -lt $successFinalGate -and $successFinalGate -lt $completed -and $completed -lt $releaseLease -and $releaseLease -lt $clearLease -and $clearLease -lt $releaseLock -and $releaseLock -lt $clearToken -and $clearToken -lt $settle -and $settle -lt $cycle.Extent.EndOffset)){return $false}
+  if($contracts[0].Extent.Text -notmatch '-ConfigurationLease\s+\$configurationLease' -or
+     $paths[0].Extent.Text -notmatch '-Contract\s+\$leasedContract' -or
+     $tokens[0].Extent.Text -notmatch '-Contract\s+\$leasedContract' -or
+     $Source -notmatch '\$manifest\s*=\s*\$leasedContract\.Manifest' -or
+     $Source -notmatch '\$minimumFreeMemoryBytes\s*=\s*\[int64\]\$manifest\.resource_policy\.runtime_minimum_free_memory_bytes' -or
+     $Source -match '\$minimumFreeMemoryBytes\s*=\s*(?:\[int64\])?1073741824'){return $false}
+  foreach($call in @(Get-ThriveLensCommandAsts -Ast $cycle -Name 'Assert-ThriveLensWslCleanupIdentity')){
+   if($call.Extent.Text -notmatch '-IdentityToken\s+\$probeIdentityToken' -or $call.Extent.Text -notmatch '-LifecycleLock\s+\$probeLifecycleLock' -or $call.Extent.Text -notmatch '-Contract\s+\$leasedContract'){return $false}
+  }
+  foreach($boundName in @('Assert-ThriveLensClusterScramConfig','Assert-ThriveLensWslLoopback')){
+   foreach($call in @(Get-ThriveLensCommandAsts -Ast $cycle -Name $boundName)){if($call.Extent.Text -notmatch '-Paths\s+\$leasedPaths' -or $call.Extent.Text -notmatch '-Contract\s+\$leasedContract' -or $call.Extent.Text -notmatch '-IdentityToken\s+\$probeIdentityToken' -or $call.Extent.Text -notmatch '-LifecycleLock\s+\$probeLifecycleLock'){return $false}}
+  }
+  foreach($call in @(Get-ThriveLensCommandAsts -Ast $cycle -Name 'Assert-ThriveLensHostLoopback')){if($call.Extent.Text -notmatch '-Paths\s+\$leasedPaths' -or $call.Extent.Text -notmatch '-Contract\s+\$leasedContract'){return $false}}
+  foreach($call in @(Get-ThriveLensCommandAsts -Ast $cycle -Name 'Assert-ThriveLensAuthenticatedScalar')+@(Get-ThriveLensCommandAsts -Ast $cycle -Name 'Remove-ThriveLensRuntimeCredential')){
+   if($call.Extent.Text -notmatch '-Contract\s+\$leasedContract' -or $call.Extent.Text -notmatch '-Paths\s+\$leasedPaths' -or $call.Extent.Text -notmatch '-IdentityToken\s+\$probeIdentityToken' -or $call.Extent.Text -notmatch '-LifecycleLock\s+\$probeLifecycleLock'){return $false}
+  }
+  foreach($call in @(Get-ThriveLensCommandAsts -Ast $cycle -Name 'Invoke-ThriveLensGuardedDistro')){if($call.Extent.Text -notmatch '-Contract\s+\$leasedContract' -or $call.Extent.Text -notmatch '-IdentityToken\s+\$probeIdentityToken' -or $call.Extent.Text -notmatch '-LifecycleLock\s+\$probeLifecycleLock'){return $false}}
+  foreach($call in @(Get-ThriveLensCommandAsts -Ast $cycle -Name 'Stop-ThriveLensPostgresUnderLock')){if($call.Extent.Text -notmatch '-Contract\s+\$leasedContract' -or $call.Extent.Text -notmatch '-Paths\s+\$leasedPaths'){return $false}}
+  foreach($call in @(Get-ThriveLensCommandAsts -Ast $cycle -Name 'Stop-ThriveLensDistroAndVerify')+@(Get-ThriveLensCommandAsts -Ast $cycle -Name 'Assert-ThriveLensDistroStopped')){if($call.Extent.Text -notmatch '-Contract\s+\$leasedContract'){return $false}}
+  foreach($call in @(Get-ThriveLensCommandAsts -Ast $cycle -Name 'Assert-ThriveLensHostPortAbsent')){if($call.Extent.Text -notmatch '-Paths\s+\$leasedPaths' -or $call.Extent.Text -notmatch '-Contract\s+\$leasedContract'){return $false}}
+  $identityProbeCalls=Get-ThriveLensCommandAsts -Ast $cycle -Name 'Get-ThriveLensPrivateClusterIdentityFingerprint'
+  if($identityProbeCalls.Count -ne 1 -or $identityProbeCalls[0].Extent.Text -notmatch '-IdentityToken\s+\$probeIdentityToken' -or
+     $identityProbeCalls[0].Extent.Text -notmatch '-LifecycleLock\s+\$probeLifecycleLock' -or
+     $identityProbeCalls[0].Extent.Text -notmatch '-Contract\s+\$leasedContract' -or
+     $identityProbeCalls[0].Extent.Text -notmatch '-Paths\s+\$leasedPaths'){return $false}
+  $identityFunctions=@($parsed.Ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-ThriveLensPrivateClusterIdentityFingerprint'},$true))
+  if($identityFunctions.Count -ne 1){return $false}
+  $identityBody=$identityFunctions[0].Extent.Text
+  if($identityBody -notmatch 'Invoke-ThriveLensGuardedDistro[\s\S]+-CapturePrivateStandardError[\s\S]+\$Paths\.PgControlData,\s*\$Paths\.DataRoot' -or
+     $identityBody -notmatch "'/usr/bin/env',\s*'-i',\s*'LC_ALL=C',\s*'LANG=C'" -or
+     $identityBody -notmatch 'Database system identifier' -or $identityBody -notmatch '\[uint64\]::TryParse' -or
+     $identityBody -notmatch 'SHA256\]::HashData' -or $identityBody -match 'Write-(?:Output|Host|Error|Warning|Information)' -or
+      $identityBody -match 'return\s+\$identifier(?:Text)?\b'){return $false}
+   if($Source -notmatch 'elseif\s*\(\$cycleClusterIdentityFingerprint\s*-cne\s*\$clusterIdentityFingerprint\)\s*\{\s*throw\s+''POSTGRES_SYSTEM_IDENTIFIER_INVALID''\s*\}') {return $false}
+  if($Source -notmatch '\$completedCycles\s*-ne\s*2' -or $Source -notmatch 'real_postgresql\s*=\s*\(\$completedCycles\s*-eq\s*2\)' -or $Source -notmatch 'cycles\s*=\s*\$completedCycles' -or
+     $Source -notmatch '\$proofCounts\.ScramAuthenticated\s*-ne\s*2' -or $Source -notmatch '\$proofCounts\.HostAbsenceVerified\s*-ne\s*2' -or
+     $Source -notmatch '\$proofCounts\.ClusterIdentityProbed\s*-ne\s*2' -or $Source -notmatch '\$proofCounts\.PostMutationResourceGateVerified\s*-ne\s*2' -or
+     $Source -notmatch 'same_cluster_identity_verified\s*=\s*\$sameClusterIdentityVerified\s*-and\s*\(\$proofCounts\.ClusterIdentityProbed\s*-eq\s*2\)' -or
+     $Source -notmatch 'post_mutation_resource_gate_verified\s*=\s*\(\$proofCounts\.PostMutationResourceGateVerified\s*-eq\s*2\)' -or
+     $Source -notmatch 'if\s*\(\s*-not\s+\$cycleComplete\s*\)\s*\{\s*throw\s+''RUNTIME_TEST_INTERNAL_ERROR'''){return $false}
+  if($Source -notmatch 'if \(\$cycle -eq 1\)[\s\S]+credentialAbsenceVerified[\s\S]+Wait-ThriveLensInterCycleMemorySettle[\s\S]+continue'){return $false}
+  $lockFalse=@($parsed.Ast.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$lockReleaseFailed' -and $node.Right.Extent.Text -ceq '$false'},$true))
+  $leaseFalse=@($parsed.Ast.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$leaseReleaseFailed' -and $node.Right.Extent.Text -ceq '$false'},$true))
+  if($lockFalse.Count -ne 1 -or $leaseFalse.Count -ne 1){return $false}
+  $catchStop=$Source.IndexOf('Stop-ThriveLensPostgresUnderLock -IdentityToken $probeIdentityToken',$cycle.Extent.EndOffset,[StringComparison]::Ordinal)
+  $catchForce=$Source.IndexOf('Stop-ThriveLensDistroAndVerify -IdentityToken $probeIdentityToken',$catchStop,[StringComparison]::Ordinal)
+  $catchDistroAbsence=$Source.IndexOf('Assert-ThriveLensDistroStopped -Contract $leasedContract',$catchForce,[StringComparison]::Ordinal)
+  $catchHostAbsence=$Source.IndexOf('Assert-ThriveLensHostPortAbsent -Paths $leasedPaths -Contract $leasedContract',$catchDistroAbsence,[StringComparison]::Ordinal)
+  $catchFinalGate=$Source.IndexOf('Invoke-ThriveLensResourceGate -Manifest $leasedContract.Manifest',$catchHostAbsence,[StringComparison]::Ordinal)
+  $catchToken=$Source.IndexOf('Get-ThriveLensWslCleanupIdentityToken',$cycle.Extent.EndOffset,[StringComparison]::Ordinal)
+  $catchLeaseRelease=$Source.IndexOf('Exit-ThriveLensConfigurationLease -Lease $configurationLease',$cycle.Extent.EndOffset,[StringComparison]::Ordinal)
+  $catchLockRelease=$Source.IndexOf('Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock',$catchLeaseRelease,[StringComparison]::Ordinal)
+  return ($catchStop -gt $cycle.Extent.EndOffset -and $catchForce -gt $catchStop -and $catchToken -lt 0 -and
+   $catchDistroAbsence -gt $catchForce -and $catchHostAbsence -gt $catchDistroAbsence -and $catchFinalGate -gt $catchHostAbsence -and
+   $catchLeaseRelease -gt $catchFinalGate -and $catchLockRelease -gt $catchLeaseRelease -and
+   $Source -match '\$coreAttemptFailed\s*=\s*\$attempted\s*-and\s*-not\s*\$started' -and
+   $Source -match '\$originalExitCode\s*=\s*if\([\s\S]+\$coreAttemptFailed[\s\S]+\)\{3\}else\{2\}' -and
+   $Source -match 'if\(\$attempted\)\{\$finalResourceGateVerified=\$false\}' -and
+    $Source -match '\$resourceGateOutputDrainIncomplete\s*=\s*\$rawFailureCode\s*-ceq\s*''RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE''\s*-or\s*\$originalCode\s*-ceq\s*''RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE''' -and
+    $Source -match 'if\(\$resourceGateOutputDrainIncomplete\)\{[\s\S]*?\$finalResourceGateFailed=\$true\s*\}' -and
+    $Source -match 'if\(\$attempted\s*-and\s*-not\s+\$resourceGateOutputDrainIncomplete\)\{[\s\S]+Invoke-ThriveLensResourceGate\s+-Manifest\s+\$leasedContract\.Manifest' -and
+    $Source -match 'if\(\s*-not\s+\$resourceGateOutputDrainIncomplete\s*-and\s*\$cleanupLeaseVerified\s*-and\s*\$cleanupIdentityVerified\s*-and\s*\$guestCleanupAllowed\s*-and\s*\$attempted\)' -and
+   $Source -match 'Forced exact-distro containment is independent of lease validity' -and
+   $Source -match 'if\(\$null\s*-ne\s*\$configurationLease\s*-and\s*-not\s+\$currentLeaseReleaseAttempted\)' -and
+    $Source -match 'if\(\$resourceGateOutputDrainIncomplete\)\{\s*\$finalStatus=''ERROR''[\s\S]+?\$finalCode=if\(\$attempted\)\{''POST_MUTATION_RESOURCE_GATE_FAILED''\}else\{''RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE''\}[\s\S]+?\$finalExitCode=3\s*\}' -and
+    $Source -match 'cleanup_verified\s*=\s*\[bool\]\$outcome\.CleanupVerified\s*-and\s*-not\s+\$resourceGateOutputDrainIncomplete' -and
+    $Source -match 'if\(\$null\s*-ne\s*\$probeLifecycleLock\s*-and\s*-not\s+\$currentLockReleaseAttempted\)')
+ }catch{return $false}
+}
+function Invoke-ThriveLensStartCoreHarness([string]$Definition,[string]$Mode){
+ $module=New-Module -ArgumentList $Definition -ScriptBlock {
+  param([string]$CoreDefinition)
+  $script:Mode='SUCCESS';$script:Log=[Collections.Generic.List[string]]::new();$script:LeaseAssertCalls=0;$script:ResourceCalls=0;$script:MemoryCalls=0
+  function Add-CoreLog([string]$Name){$null=$script:Log.Add($Name)}
+  function Assert-ThriveLensLifecycleLockOwnership {param($LifecycleLock)Add-CoreLog 'LOCK'}
+  function Assert-ThriveLensConfigurationLease {param($Lease)Add-CoreLog 'LEASE_ASSERT';$script:LeaseAssertCalls++;if($script:Mode -ceq 'COMMIT_LEASE_FAIL' -and $script:LeaseAssertCalls -eq 2){throw 'CONFIGURATION_LEASE_CONTENT_CHANGED'}}
+  function Get-ThriveLensConfigurationLeaseFingerprint {param($Lease)Add-CoreLog 'FINGERPRINT';if($script:Mode -ceq 'COMMIT_FINGERPRINT_FAIL' -and $script:LeaseAssertCalls -ge 2){return 'B'};return 'A'}
+  function Get-ThriveLensLeasedResourceBudget {param($Lease)Add-CoreLog 'LEASE_RESOURCE';return [pscustomobject]@{phase='bootstrap_active'}}
+  function Get-ThriveLensWslContract {param($ConfigurationLease)Add-CoreLog 'LEASE_CONTRACT';return [pscustomobject]@{Manifest=[pscustomobject]@{resource_policy=[pscustomobject]@{allowed_active_phases=@('bootstrap_active');runtime_minimum_free_memory_bytes=[int64]1024}};Wsl=[pscustomobject]@{}}}
+  function Invoke-ThriveLensResourceGate {param($Manifest)Add-CoreLog 'RESOURCE';$script:ResourceCalls++;if($script:Mode -ceq 'EARLY_RESOURCE' -and $script:ResourceCalls -eq 1){throw 'SYNTHETIC'};if($script:Mode -ceq 'POST_GATE' -and $script:ResourceCalls -eq 2){throw 'SYNTHETIC'}}
+  function Get-ThriveLensFreeMemoryBytes {Add-CoreLog 'RAM';$script:MemoryCalls++;if($script:Mode -ceq 'RAM1_LOW' -and $script:MemoryCalls -eq 1){return 1023};if($script:Mode -ceq 'RAM2_LOW' -and $script:MemoryCalls -eq 2){return 1023};return 2048}
+  function Assert-ThriveLensWslIdentity {param($IdentityToken,$LifecycleLock,$Contract)Add-CoreLog 'WSL_IDENTITY'}
+  function Assert-ThriveLensWslPackages {param($Contract,$IdentityToken,$LifecycleLock)Add-CoreLog 'PACKAGES';if($script:Mode -ceq 'MID_PACKAGES'){throw 'WSL_PACKAGE_MISMATCH'}}
+  function Assert-ThriveLensWslInternalDisk {param($RequiredBytes,$Contract,$IdentityToken,$LifecycleLock)Add-CoreLog 'DISK'}
+  function Get-ThriveLensWslClusterState {param($Paths,$Contract,$IdentityToken,$LifecycleLock)Add-CoreLog 'CLUSTER';return 'VALID'}
+  function Assert-ThriveLensLinuxPathPolicy {param([switch]$RequireLeaf,$Paths,$Contract,$IdentityToken,$LifecycleLock)Add-CoreLog 'PATH'}
+  function Assert-ThriveLensWslAbsent {param($Paths,$Contract,$IdentityToken,$LifecycleLock)Add-CoreLog 'WSL_ABSENT'}
+  function Assert-ThriveLensHostPortAbsent {param($Paths,$Contract)Add-CoreLog 'HOST_ABSENT'}
+  function Get-ThriveLensWslPaths {param($Contract)Add-CoreLog 'PATHS';return [pscustomobject]@{PgCtl='/synthetic/pg_ctl';DataRoot='/synthetic/data';Port=55432}}
+  function Invoke-ThriveLensGuardedDistro {param($IdentityToken,$LifecycleLock,$TimeoutSeconds,$Contract,[string[]]$Arguments)Add-CoreLog 'PG_CTL';return [pscustomobject]@{ExitCode=if($script:Mode -ceq 'START_FAIL'){1}else{0};Output=''}}
+  function Assert-ThriveLensWslLoopback {param($Paths,$Contract,$IdentityToken,$LifecycleLock)Add-CoreLog 'WSL_LOOPBACK'}
+  function Assert-ThriveLensHostLoopback {param($Paths,$Contract)Add-CoreLog 'HOST_LOOPBACK'}
+  . ([scriptblock]::Create($CoreDefinition))
+  function Invoke-CoreCase([string]$Case){
+   $script:Mode=$Case;$script:Log.Clear();$script:LeaseAssertCalls=0;$script:ResourceCalls=0;$script:MemoryCalls=0
+   $lock=[Threading.Mutex]::new($false);$lease=[pscustomobject]@{Name='lease'};$token=[pscustomobject]@{Name='token'};$touched=$false;$attempted=$false;$startCommit=$true;$code=$null
+   try{Invoke-ThriveLensPostgresStartUnderLock -ConfigurationLease $lease -IdentityToken $token -LifecycleLock $lock -WslTouched ([ref]$touched) -StartAttempted ([ref]$attempted) -StartCommitResourceGateVerified ([ref]$startCommit)}catch{$code=[string]$_.Exception.Message}finally{$lock.Dispose()}
+   return [pscustomobject]@{Code=$code;WslTouched=$touched;StartAttempted=$attempted;StartCommitResourceGateVerified=$startCommit;Log=@($script:Log)}
+  }
+ }
+ try{return & $module {param($Case)Invoke-CoreCase -Case $Case} $Mode}finally{Remove-Module $module -Force -ErrorAction SilentlyContinue}
+}
+function Invoke-ThriveLensStartAdapterHarness([string]$Source,[string]$Mode){
+ $executable=[regex]::Replace($Source,'(?m)^\s*Import-Module[^\r\n]*\r?\n','')
+ $tail='(?ms)\$response\s*\|\s*ConvertTo-Json\s+-Compress\s*\r?\n\s*exit\s+\$responseExitCode\s*$'
+ if(-not [regex]::IsMatch($executable,$tail)){throw 'START_ADAPTER_HARNESS_TAIL_NOT_FOUND'}
+ $executable=[regex]::Replace($executable,$tail,'[pscustomobject]@{ Response = $response; ExitCode = $responseExitCode }')
+ $module=New-Module -ArgumentList $executable -ScriptBlock {
+  param([string]$AdapterSource)
+  $script:Mode='SUCCESS';$script:Log=[Collections.Generic.List[string]]::new();$script:TokenCalls=0;$script:SameToken=$true;$script:SameConfiguration=$true;$script:HarnessLock=$null;$script:HarnessToken=$null;$script:HarnessLease=$null;$script:HarnessContract=$null;$script:HarnessPaths=$null
+  function Add-AdapterLog([string]$Name){$null=$script:Log.Add($Name)}
+  function Test-AdapterAuthority($IdentityToken,$LifecycleLock){if(-not [object]::ReferenceEquals($IdentityToken,$script:HarnessToken) -or -not [object]::ReferenceEquals($LifecycleLock,$script:HarnessLock)){$script:SameToken=$false;throw 'SYNTHETIC_AUTHORITY_CHANGED'}}
+  function Test-AdapterConfiguration($Contract,$Paths=$null){if(-not [object]::ReferenceEquals($Contract,$script:HarnessContract) -or ($null -ne $Paths -and -not [object]::ReferenceEquals($Paths,$script:HarnessPaths))){$script:SameConfiguration=$false;throw 'SYNTHETIC_CONFIGURATION_CHANGED'}}
+  function Enter-ThriveLensLifecycleLock {Add-AdapterLog 'LOCK_ENTER';$script:HarnessLock=[Threading.Mutex]::new($false);return $script:HarnessLock}
+  function Enter-ThriveLensConfigurationLease {Add-AdapterLog 'LEASE_ENTER';if($script:Mode -ceq 'PRE_LEASE_FAIL'){throw 'CONFIGURATION_LEASE_OPEN_FAILED'};$script:HarnessLease=[pscustomobject]@{Name='lease'};return $script:HarnessLease}
+  function Assert-ThriveLensConfigurationLease {param($Lease)Add-AdapterLog 'LEASE_ASSERT';if(-not [object]::ReferenceEquals($Lease,$script:HarnessLease)){throw 'CONFIGURATION_LEASE_INVALID'}}
+  function Get-ThriveLensWslContract {param($ConfigurationLease)Add-AdapterLog 'CONTRACT';if(-not [object]::ReferenceEquals($ConfigurationLease,$script:HarnessLease)){throw 'CONFIGURATION_LEASE_INVALID'};$script:HarnessContract=[pscustomobject]@{Name='contract';Manifest=[pscustomobject]@{Name='manifest'}};return $script:HarnessContract}
+  function Get-ThriveLensWslPaths {param($Contract)Add-AdapterLog 'PATHS';Test-AdapterConfiguration $Contract;$script:HarnessPaths=[pscustomobject]@{Name='paths';Port=55439};return $script:HarnessPaths}
+  function Get-ThriveLensWslCleanupIdentityToken {param($LifecycleLock,$Contract)Add-AdapterLog 'TOKEN';$script:TokenCalls++;if(-not [object]::ReferenceEquals($LifecycleLock,$script:HarnessLock)){throw 'SYNTHETIC_LOCK_CHANGED'};Test-AdapterConfiguration $Contract;$script:HarnessToken=[pscustomobject]@{Name='token'};return $script:HarnessToken}
+  function Invoke-ThriveLensPostgresStartUnderLock {
+   param($ConfigurationLease,$IdentityToken,$LifecycleLock,[ref]$WslTouched,[ref]$StartAttempted,[ref]$StartCommitResourceGateVerified)
+   Add-AdapterLog 'CORE';$StartCommitResourceGateVerified.Value=$false
+   Test-AdapterAuthority $IdentityToken $LifecycleLock
+   if(-not [object]::ReferenceEquals($ConfigurationLease,$script:HarnessLease)){throw 'CONFIGURATION_LEASE_INVALID'}
+   if($script:Mode -cin @('RESOURCE_GATE_UNAVAILABLE','RESOURCE_GATE_FAILED','RESOURCE_GATE_RESULT_INVALID','RESOURCE_GATE_MANIFEST_INVALID','RESOURCE_GATE_PROCESS_START_FAILED','RESOURCE_GATE_TIMEOUT','RESOURCE_GATE_OUTPUT_LIMIT','WSL_STANDARD_INPUT_INVALID','WSL_STANDARD_INPUT_LIMIT_EXCEEDED','INITIAL_OUTPUT_DRAIN')){if($script:Mode -ceq 'INITIAL_OUTPUT_DRAIN'){throw 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE'};throw $script:Mode}
+   switch($script:Mode){
+    'EARLY_FAIL'{throw 'RESOURCE_GATE_FAILED'}
+    'MID_FAIL'{$WslTouched.Value=$true;throw 'WSL_PACKAGE_MISMATCH'}
+    'OUTPUT_DRAIN'{$WslTouched.Value=$true;$StartAttempted.Value=$true;throw 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE'}
+    'POST_FAIL'{$WslTouched.Value=$true;$StartAttempted.Value=$true;throw 'POST_MUTATION_RESOURCE_GATE_FAILED'}
+    'FINAL_GATE_FAIL'{$WslTouched.Value=$true;$StartAttempted.Value=$true;throw 'POST_MUTATION_RESOURCE_GATE_FAILED'}
+    'STOP_FAIL'{$WslTouched.Value=$true;$StartAttempted.Value=$true;throw 'POST_MUTATION_RESOURCE_GATE_FAILED'}
+    default{$WslTouched.Value=$true;$StartAttempted.Value=$true;$StartCommitResourceGateVerified.Value=$true}
+   }
+  }
+  function Invoke-ThriveLensResourceGate {param($Manifest)Add-AdapterLog 'FINAL_GATE';if($script:Mode -ceq 'FINAL_GATE_FAIL'){throw 'RESOURCE_GATE_FAILED'}}
+  function Test-ThriveLensCredentialCleanupAllowedAfterFailure {param($FailureCode)Add-AdapterLog 'GUEST_POLICY';return $FailureCode -cne 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE' -and $script:Mode -cnotin @('LEASE_RELEASE_FAIL','LOCK_RELEASE_FAIL')}
+  function Assert-ThriveLensWslCleanupIdentity {param($IdentityToken,$LifecycleLock,$Contract)Add-AdapterLog 'IDENTITY';Test-AdapterAuthority $IdentityToken $LifecycleLock;Test-AdapterConfiguration $Contract}
+  function Stop-ThriveLensPostgresUnderLock {param($IdentityToken,$LifecycleLock,$Contract,$Paths)Add-AdapterLog 'STOP';Test-AdapterAuthority $IdentityToken $LifecycleLock;Test-AdapterConfiguration $Contract $Paths;if($script:Mode -ceq 'STOP_FAIL'){throw 'POSTGRES_STOP_FAILED'};return $true}
+  function Stop-ThriveLensDistroAndVerify {param($IdentityToken,$LifecycleLock,$Contract)Add-AdapterLog 'FORCE';Test-AdapterAuthority $IdentityToken $LifecycleLock;Test-AdapterConfiguration $Contract}
+  function Resolve-ThriveLensDistroCleanupFailure {param($FailureCode)return [pscustomobject]@{IdentityAuthorityPreserved=$true}}
+  function Assert-ThriveLensDistroStopped {param($Contract)Add-AdapterLog 'DISTRO_ABSENT';Test-AdapterConfiguration $Contract}
+  function Assert-ThriveLensHostPortAbsent {param($Paths,$Contract)Add-AdapterLog 'HOST_ABSENT';Test-AdapterConfiguration $Contract $Paths}
+  function Exit-ThriveLensLifecycleLock {param($Mutex)Add-AdapterLog 'LOCK_RELEASE';if($script:Mode -ceq 'LOCK_RELEASE_FAIL'){throw 'SYNTHETIC_RELEASE_FAILURE'};Add-AdapterLog 'LOCK_RELEASED'}
+  function Exit-ThriveLensConfigurationLease {param($Lease)Add-AdapterLog 'LEASE_RELEASE';if($script:Mode -ceq 'LEASE_RELEASE_FAIL'){throw 'SYNTHETIC_LEASE_RELEASE_FAILURE'};Add-AdapterLog 'LEASE_RELEASED'}
+  function Invoke-AdapterCase([string]$Case){
+   $script:Mode=$Case;$script:Log.Clear();$script:TokenCalls=0;$script:SameToken=$true;$script:SameConfiguration=$true;$script:HarnessLock=$null;$script:HarnessToken=$null;$script:HarnessLease=$null;$script:HarnessContract=$null;$script:HarnessPaths=$null
+   $values=@(& ([scriptblock]::Create($AdapterSource)))
+   $adapter=if($values.Count -eq 1){$values[0]}else{$null}
+   return [pscustomobject]@{Adapter=$adapter;Log=@($script:Log);TokenCalls=$script:TokenCalls;SameToken=$script:SameToken;SameConfiguration=$script:SameConfiguration;Lock=$script:HarnessLock}
+  }
+ }
+ try{return & $module {param($Case)Invoke-AdapterCase -Case $Case} $Mode}finally{try{& $module {if($null -ne $script:HarnessLock){$script:HarnessLock.Dispose()}}}catch{};Remove-Module $module -Force -ErrorAction SilentlyContinue}
+}
+function Invoke-ThriveLensStartImportFailureHarness([string]$Source){
+ $runtimeImport="Import-Module (Join-Path `$PSScriptRoot 'Runtime.psm1') -Force"
+ $executable=Replace-ThriveLensTestSourceOnce -Source $Source -Old $runtimeImport -New "throw 'synthetic private import failure'"
+ $wslImport="Import-Module (Join-Path `$PSScriptRoot 'WslRuntime.psm1') -Force"
+ $executable=Replace-ThriveLensTestSourceOnce -Source $executable -Old $wslImport -New ''
+ $tail='(?ms)\$response\s*\|\s*ConvertTo-Json\s+-Compress\s*\r?\n\s*exit\s+\$responseExitCode\s*$'
+ if(-not [regex]::IsMatch($executable,$tail)){throw 'START_IMPORT_FAILURE_HARNESS_TAIL_NOT_FOUND'}
+ $executable=[regex]::Replace($executable,$tail,'[pscustomobject]@{ Response = $response; ExitCode = $responseExitCode }')
+ $values=@(& ([scriptblock]::Create($executable)))
+ if($values.Count -ne 1){return $null}
+ return $values[0]
+}
+function Invoke-ThriveLensRuntimeImportFailureHarness([string]$Source){
+ $runtimeImport="Import-Module (Join-Path `$PSScriptRoot 'Runtime.psm1') -Force"
+ $executable=Replace-ThriveLensTestSourceOnce -Source $Source -Old $runtimeImport -New "throw 'synthetic private import failure'"
+ $executable=Replace-ThriveLensTestSourceOnce -Source $executable -Old '        exit 3' -New '        return'
+ $values=@(& ([scriptblock]::Create($executable)))
+ if($values.Count -ne 1 -or $values[0] -isnot [string]){return $null}
+ try{return $values[0]|ConvertFrom-Json}catch{return $null}
+}
+function Invoke-ThriveLensRuntimeInitialDrainHarness([string]$Source){
+ $parsed=Get-ThriveLensParsedSource -Source $Source
+ if($parsed.Errors.Count -ne 0){throw 'RUNTIME_DRAIN_HARNESS_PARSE_FAILED'}
+ $outerTry=@($parsed.Ast.EndBlock.Statements|Where-Object{$_ -is [Management.Automation.Language.TryStatementAst]})[0]
+ if($null -eq $outerTry){throw 'RUNTIME_DRAIN_HARNESS_TRY_NOT_FOUND'}
+ $executable=Replace-ThriveLensTestAstExtent -Source $Source -Extent $outerTry.Body.Extent -New '{ $modulesReady=$true; throw ''RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE'' }'
+ $executable=Replace-ThriveLensTestSourceOnce -Source $executable -Old '    exit $finalExitCode' -New '    return'
+ $module=New-Module -ArgumentList $executable -ScriptBlock {
+  param([string]$RuntimeSource)
+  function Resolve-ThriveLensRuntimePublicCode {param($Code)return $Code}
+  function Resolve-ThriveLensRuntimeCleanupOutcome {
+   param($OriginalCode,$OriginalExitCode,$CleanupRequired,$CleanupAuthorityVerified,$CredentialCleanupRequired,$CredentialRemoveFailed,$CredentialRootFailureCode,$CredentialAbsenceVerified,$IdentityChanged,$PostgresStopFailed,$DistroTerminateFailed,$DistroAbsenceCheckFailed,$HostAbsenceCheckFailed,$DistroAbsent,$HostAbsent,$LockReleaseFailed)
+   return [pscustomobject]@{Status='BLOCKED';Code=$OriginalCode;ExitCode=$OriginalExitCode;OriginalCode=$OriginalCode;FailureStages=@('RESOURCE_GATE');CleanupVerified=$true}
+  }
+  function Invoke-RuntimeDrainCase {
+   $values=@(& ([scriptblock]::Create($RuntimeSource)))
+   if($values.Count -ne 1 -or $values[0] -isnot [string]){return $null}
+   try{return $values[0]|ConvertFrom-Json}catch{return $null}
+  }
+ }
+ try{return & $module {Invoke-RuntimeDrainCase}}finally{Remove-Module $module -Force -ErrorAction SilentlyContinue}
+}
+function Invoke-ThriveLensClusterIdentityHarness([string]$Definition,[string]$Mode){
+ $module=New-Module -ArgumentList $Definition -ScriptBlock {
+  param([string]$IdentityDefinition)
+  $script:Mode='SUCCESS';$script:Log=[Collections.Generic.List[string]]::new();$script:ExpectedToken=$null;$script:ExpectedLock=$null;$script:ExpectedContract=$null;$script:ExpectedPaths=$null;$script:Bound=$true
+  function Assert-ThriveLensWslCleanupIdentity {param($IdentityToken,$LifecycleLock,$Contract)$script:Log.Add('IDENTITY');if(-not [object]::ReferenceEquals($IdentityToken,$script:ExpectedToken)-or-not[object]::ReferenceEquals($LifecycleLock,$script:ExpectedLock)-or-not[object]::ReferenceEquals($Contract,$script:ExpectedContract)){$script:Bound=$false;throw 'AUTHORITY_CHANGED'}}
+  function Invoke-ThriveLensGuardedDistro {param($IdentityToken,$LifecycleLock,$Contract,[switch]$CapturePrivateStandardError,[string[]]$Arguments)$script:Log.Add('PG_CONTROLDATA');if(-not [object]::ReferenceEquals($IdentityToken,$script:ExpectedToken)-or-not[object]::ReferenceEquals($LifecycleLock,$script:ExpectedLock)-or-not[object]::ReferenceEquals($Contract,$script:ExpectedContract)-or-not$CapturePrivateStandardError-or($Arguments-join ',')-cne'/usr/bin/env,-i,LC_ALL=C,LANG=C,/synthetic/pg_controldata,/synthetic/data'){$script:Bound=$false;throw 'ARGUMENTS_CHANGED'};$output=switch($script:Mode){'DUPLICATE'{"Database system identifier: 7234567890123456789`nDatabase system identifier: 7234567890123456789`n"};'ZERO'{"Database system identifier: 0`n"};'OVERFLOW'{"Database system identifier: 18446744073709551616`n"};'MALFORMED'{"Database system identifier: +7234567890123456789`n"};default{"pg_control version number: 1700`nDatabase system identifier: 7234567890123456789`n"}};return [pscustomobject]@{ExitCode=if($script:Mode-ceq'EXIT'){1}else{0};PrivateStandardOutput=$output;PrivateStandardError=if($script:Mode-ceq'STDERR'){'private failure'}else{''};Output=$output}}
+  . ([scriptblock]::Create($IdentityDefinition))
+  function Invoke-IdentityCase([string]$Case){$script:Mode=$Case;$script:Log.Clear();$script:Bound=$true;$script:ExpectedToken=[pscustomobject]@{Name='token'};$script:ExpectedLock=[Threading.Mutex]::new($false);$script:ExpectedContract=[pscustomobject]@{Name='contract'};$script:ExpectedPaths=[pscustomobject]@{PgControlData='/synthetic/pg_controldata';DataRoot='/synthetic/data'};$value=$null;$code=$null;try{$value=Get-ThriveLensPrivateClusterIdentityFingerprint -IdentityToken $script:ExpectedToken -LifecycleLock $script:ExpectedLock -Contract $script:ExpectedContract -Paths $script:ExpectedPaths}catch{$code=[string]$_.Exception.Message}finally{$script:ExpectedLock.Dispose()};return [pscustomobject]@{Value=$value;Code=$code;Bound=$script:Bound;Log=@($script:Log)}}
+ }
+ try{return & $module {param($Case)Invoke-IdentityCase -Case $Case} $Mode}finally{Remove-Module $module -Force -ErrorAction SilentlyContinue}
 }
 function Replace-ThriveLensTestSourceOnce([string]$Source,[string]$Old,[string]$New){
  $first=$Source.IndexOf($Old,[StringComparison]::Ordinal)
  if($first -lt 0 -or $Source.IndexOf($Old,$first+$Old.Length,[StringComparison]::Ordinal) -ge 0){throw 'TEST_MUTATION_TARGET_NOT_UNIQUE'}
  return $Source.Substring(0,$first)+$New+$Source.Substring($first+$Old.Length)
+}
+function Replace-ThriveLensTestSourceOccurrence([string]$Source,[string]$Old,[string]$New,[int]$Occurrence=1){
+ if($Occurrence -lt 1){throw 'TEST_MUTATION_OCCURRENCE_INVALID'}
+ $offset=-1
+ for($index=0;$index -lt $Occurrence;$index++){
+  $offset=$Source.IndexOf($Old,$offset+1,[StringComparison]::Ordinal)
+  if($offset -lt 0){throw 'TEST_MUTATION_TARGET_NOT_FOUND'}
+ }
+ return $Source.Substring(0,$offset)+$New+$Source.Substring($offset+$Old.Length)
+}
+function Replace-ThriveLensTestAstExtent([string]$Source,[Management.Automation.Language.IScriptExtent]$Extent,[string]$New){
+ return $Source.Substring(0,$Extent.StartOffset)+$New+$Source.Substring($Extent.EndOffset)
 }
 try{
  $root=(Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
@@ -95,23 +509,48 @@ try{
  A ([string]$manifest.wsl_fallback.cluster_log_root -ceq '/var/log/thrivelens/postgresql/r0') 'POSIX_LOG'
  A (-not [bool]$manifest.wsl_fallback.logs_persisted) 'NO_RAW_LOG'
  $module=Get-Content (Join-Path $PSScriptRoot 'WslRuntime.psm1') -Raw
- A ($module -match 'BoundedCaptureStream') 'BOUNDED_CAPTURE'
+ $wslModuleParsed=Get-ThriveLensParsedSource -Source $module
+ $wslFunctions=@($wslModuleParsed.Ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst]},$true))
+ $invokeWslAst=@($wslFunctions|Where-Object{$_.Name -ceq 'Invoke-ThriveLensWsl'})
+ $invokeWslBody=if($invokeWslAst.Count -eq 1){$invokeWslAst[0].Extent.Text}else{''}
+ Import-Module (Join-Path $PSScriptRoot 'Runtime.psm1') -Force
+ Import-Module (Join-Path $PSScriptRoot 'WslRuntime.psm1') -Force
+ $invalidWslSecurityVersions=@(@('OutputBudget','BoundedCaptureStream','HostFileIdentity','MutexOwnershipVerifier')|Where-Object{$type=("ThriveLens.WslSecurityV2.$_" -as [type]);$null -eq $type -or $null -eq $type.GetField('ContractVersion',[Reflection.BindingFlags]'Public,Static') -or $type.GetField('ContractVersion',[Reflection.BindingFlags]'Public,Static').GetRawConstantValue() -ne 2})
+ A ((Test-ThriveLensWslSecurityTypeContract -Source $module) -and $invalidWslSecurityVersions.Count -eq 0) 'WSL_SECURITY_V2_EXACT_IMPORT_AND_BEHAVIOR_ATTESTATION'
+ A ($invokeWslBody -match '\[ThriveLens\.WslSecurityV2\.OutputBudget\]::new\(131072\)' -and $invokeWslBody -match '\[ThriveLens\.WslSecurityV2\.BoundedCaptureStream\]::new\(\$budget\)') 'BOUNDED_CAPTURE'
  A ($module -match 'Kill\(\$true\)') 'TREE_KILL'
  A ($module -match "distribution_name -cne 'ThriveLens-R0'") 'EXACT_TARGET'
  A ($module -match 'WSL_CLUSTER_PATH_SYMLINK_REJECTED') 'SYMLINK_GATE'
  A ($module -match 'POSTGRES_PROCESS_STILL_PRESENT') 'PROCESS_ABSENCE'
  A ($module -match 'Local\\ThriveLens-R0-PostgreSQL-Lifecycle') 'LIFECYCLE_LOCK'
- $invokeWslStart=$module.IndexOf('function Invoke-ThriveLensWsl');$invokeWslEnd=$module.IndexOf('function Invoke-ThriveLensDistro',$invokeWslStart);$invokeWslBody=if($invokeWslStart -ge 0 -and $invokeWslEnd -gt $invokeWslStart){$module.Substring($invokeWslStart,$invokeWslEnd-$invokeWslStart)}else{''}
  A ($invokeWslBody -notmatch "--terminate|WSL_PROCESS_TREE_TERMINATION_UNPROVEN") 'GENERIC_WSL_NEVER_TERMINATES_DISTRO'
+ A ($invokeWslBody -match '\$timeoutMilliseconds\s*=\s*\[Math\]::BigMul\(\[int\]\$TimeoutSeconds,1000\)' -and
+    $invokeWslBody -match '\$stopwatch\s*=\s*\[Diagnostics\.Stopwatch\]::StartNew\(\)' -and
+    $invokeWslBody -match '\$stopwatch\.ElapsedMilliseconds\s*-lt\s*\$timeoutMilliseconds' -and
+    $invokeWslBody -notmatch 'DateTime|UtcNow') 'WSL_RUNNER_ONE_MONOTONIC_DEADLINE'
+ A ($invokeWslBody -match 'UTF8Encoding\]::new\(\$false,\$true\)\.GetBytes\(\$StandardInput\)' -and
+    $invokeWslBody -match '\$stdinBytes\.Length\s*-gt\s*512' -and
+    $invokeWslBody -match "throw 'WSL_STANDARD_INPUT_INVALID'" -and $invokeWslBody -match "throw 'WSL_STANDARD_INPUT_LIMIT_EXCEEDED'" -and
+    $invokeWslBody -match '\[Array\]::Clear\(\$stdinBytes,0,\$stdinBytes\.Length\)') 'WSL_RUNNER_STDIN_STRICT_PRESTART_BOUNDARY'
+ A ($invokeWslBody -match '\$stdinWriteTask=\$process\.StandardInput\.BaseStream\.WriteAsync' -and
+    $invokeWslBody -match '\$stdinFlushTask=\$process\.StandardInput\.BaseStream\.FlushAsync\(\)' -and
+    $invokeWslBody -match 'foreach\(\$ioTask\s+in\s+@\(\$stdoutTask,\$stderrTask,\$stdinWriteTask,\$stdinFlushTask\)\)' -and
+    $invokeWslBody -match 'if\(-not \$process\.HasExited\)\{\$process\.Kill\(\$true\)\}' -and
+    $invokeWslBody -match '\$rootReaped=\$process\.WaitForExit\(5000\)' -and
+    $invokeWslBody -match 'if\(-not \$cleanupProven\)\{throw ''WSL_OUTPUT_DRAIN_INCOMPLETE''\}') 'WSL_RUNNER_KILL_REAP_JOIN_UNCERTAINTY'
+ A ($invokeWslBody -match 'if\(\$stdoutComplete\)\{\$stdoutSink\.Dispose\(\)\}' -and
+    $invokeWslBody -match 'if\(\$stderrComplete\)\{\$stderrSink\.Dispose\(\)\}' -and
+    $invokeWslBody -match 'if\(\$rootInactive\s*-and\s*\$stdoutComplete\s*-and\s*\$stderrComplete\s*-and\s*\$stdinWriteComplete\s*-and\s*\$stdinFlushComplete\)\{\$process\.Dispose\(\)\}') 'WSL_RUNNER_NO_ACTIVE_TASK_SINK_OR_PROCESS_DISPOSE'
  $terminateStart=$module.IndexOf('function Stop-ThriveLensDistroAndVerify');$terminateEnd=$module.IndexOf('function Assert-ThriveLensDistroStopped',$terminateStart);$terminateBody=if($terminateStart -ge 0 -and $terminateEnd -gt $terminateStart){$module.Substring($terminateStart,$terminateEnd-$terminateStart)}else{''}
  A ($terminateBody -match 'IdentityToken' -and $terminateBody -match 'LifecycleLock' -and $terminateBody -match 'Assert-ThriveLensWslCleanupIdentity' -and $terminateBody -match 'finally') 'TERMINATE_REVALIDATES_IDENTITY_PRE_POST'
  $runtimeModule=Get-Content (Join-Path $PSScriptRoot 'Runtime.psm1') -Raw
- $readerStart=$runtimeModule.IndexOf('function Read-ThriveLensPostgresBootstrapSecret');$readerEnd=if($readerStart -ge 0){$runtimeModule.IndexOf('function Resolve-ThriveLensStartChildFailure',$readerStart)}else{-1};$readerBody=if($readerStart -ge 0 -and $readerEnd -gt $readerStart){$runtimeModule.Substring($readerStart,$readerEnd-$readerStart)}else{''}
+ $readerStart=$runtimeModule.IndexOf('function Read-ThriveLensPostgresBootstrapSecret');$readerEnd=if($readerStart -ge 0){$runtimeModule.IndexOf('function Assert-ThriveLensVersionText',$readerStart)}else{-1};$readerBody=if($readerStart -ge 0 -and $readerEnd -gt $readerStart){$runtimeModule.Substring($readerStart,$readerEnd-$readerStart)}else{''}
  A ($readerBody -match 'Assert-ThriveLensSecretRootAcl') 'SECRET_READER_PARENT_ACL'
  A ($readerBody -match 'Assert-ThriveLensSecretFileAclRules') 'SECRET_READER_FILE_ACL'
  A ($readerBody -match '\[IO\.FileShare\]::None') 'SECRET_READER_EXCLUSIVE_OPEN'
  Import-Module (Join-Path $PSScriptRoot 'Runtime.psm1') -Force
  Import-Module (Join-Path $PSScriptRoot 'WslRuntime.psm1') -Force
+ A (('ThriveLens.WslSecurityV2.OutputBudget' -as [type]) -and ('ThriveLens.WslSecurityV2.BoundedCaptureStream' -as [type])) 'WSL_SECURITY_V2_FORCE_REIMPORT_SAME_PROCESS'
  $memoryType=[ThriveLens.HostMemorySnapshot]
  $nonPublicStatic=[Reflection.BindingFlags]::NonPublic -bor [Reflection.BindingFlags]::Static
  $nonPublicNested=[Reflection.BindingFlags]::NonPublic
@@ -174,8 +613,8 @@ try{
  try{A (Test-ThrowsExact {Stop-ThriveLensDistroAndVerify -IdentityToken $identityToken -LifecycleLock $unownedLock} 'LIFECYCLE_LOCK_OWNERSHIP_REQUIRED') 'TERMINATE_WITHOUT_HELD_LOCK_REJECTED'}finally{$unownedLock.Dispose()}
  $nativeLock=Enter-ThriveLensLifecycleLock -TimeoutSeconds 2
  try{
-  A ([ThriveLens.MutexOwnershipVerifier]::IsOwnedByCurrentThread($nativeLock)) 'NATIVE_CURRENT_THREAD_MUTEX_OWNERSHIP'
-  A (-not [ThriveLens.MutexOwnershipVerifier]::CheckFromNewThread($nativeLock)) 'NATIVE_CROSS_THREAD_MUTEX_REJECTED'
+  A ([ThriveLens.WslSecurityV2.MutexOwnershipVerifier]::IsOwnedByCurrentThread($nativeLock)) 'NATIVE_CURRENT_THREAD_MUTEX_OWNERSHIP'
+  A (-not [ThriveLens.WslSecurityV2.MutexOwnershipVerifier]::CheckFromNewThread($nativeLock)) 'NATIVE_CROSS_THREAD_MUTEX_REJECTED'
  }finally{Exit-ThriveLensLifecycleLock -Mutex $nativeLock}
  $releasedLock=Enter-ThriveLensLifecycleLock -TimeoutSeconds 2
  try{
@@ -233,24 +672,13 @@ try{
   $secretValue=Read-ThriveLensPostgresBootstrapSecret -Path $secretPath
   A ($secretValue -cmatch '^[A-Za-z0-9_-]{43,128}$') 'EXECUTABLE_PROTECTED_SECRET_READER'
  }finally{$secretValue=$null;Remove-Variable -Name secretValue -ErrorAction SilentlyContinue}
- $budget=[ThriveLens.OutputBudget]::new(8);$sinkA=[ThriveLens.BoundedCaptureStream]::new($budget);$sinkB=[ThriveLens.BoundedCaptureStream]::new($budget)
+ $budget=[ThriveLens.WslSecurityV2.OutputBudget]::new(8);$sinkA=[ThriveLens.WslSecurityV2.BoundedCaptureStream]::new($budget);$sinkB=[ThriveLens.WslSecurityV2.BoundedCaptureStream]::new($budget)
  try{$sinkA.Write([byte[]](1,2,3,4),0,4);$sinkB.Write([byte[]](5,6,7,8),0,4);try{$sinkA.Write([byte[]](9),0,1)}catch{};A ($budget.Exceeded -and ($sinkA.Length+$sinkB.Length) -eq 8) 'EXECUTABLE_SHARED_OUTPUT_CAP'}finally{$sinkA.Dispose();$sinkB.Dispose()}
  A ((Resolve-ThriveLensClusterProbe -ExistsExitCode 1 -PathPolicyValid $false -VersionExitCode 1 -VersionOutput '' -ControlExitCode 1 -ChecksumsEnabled $false) -ceq 'ABSENT') 'CLUSTER_CLASSIFIER_ABSENT'
  A ((Resolve-ThriveLensClusterProbe -ExistsExitCode 0 -PathPolicyValid $true -VersionExitCode 0 -VersionOutput '17' -ControlExitCode 0 -ChecksumsEnabled $true) -ceq 'VALID') 'CLUSTER_CLASSIFIER_VALID'
  A ((Resolve-ThriveLensClusterProbe -ExistsExitCode 0 -PathPolicyValid $true -VersionExitCode 0 -VersionOutput '16' -ControlExitCode 0 -ChecksumsEnabled $true) -ceq 'PARTIAL_OR_INVALID') 'CLUSTER_CLASSIFIER_PARTIAL'
- $fatalChild=Resolve-ThriveLensChildOutcome -ExitCode 3 -IndependentCleanupVerified $true;A ($fatalChild.Fatal -and $fatalChild.ExitCode -eq 3) 'CHILD_FATAL_PRESERVED'
- $unsafeChild=Resolve-ThriveLensChildOutcome -ExitCode 2 -IndependentCleanupVerified $false;A ($unsafeChild.Fatal -and $unsafeChild.ExitCode -eq 3) 'CHILD_CLEANUP_UNVERIFIED_FATAL'
- $startOk=Resolve-ThriveLensStartChildExit -ExitCode 0;A ($startOk.Status -ceq 'STARTED' -and -not $startOk.Fatal -and -not $startOk.FreshCleanupAllowed) 'START_EXIT_ZERO_ACCEPTED'
- $startBlocked=Resolve-ThriveLensStartChildExit -ExitCode 2;A ($startBlocked.Status -ceq 'BLOCKED' -and -not $startBlocked.Fatal -and -not $startBlocked.FreshCleanupAllowed) 'START_EXIT_TWO_FRESH_CLEANUP_DENIED'
- foreach($unexpectedExit in @(1,3,255)){$startFatal=Resolve-ThriveLensStartChildExit -ExitCode $unexpectedExit;A ($startFatal.Fatal -and -not $startFatal.FreshCleanupAllowed -and $startFatal.ExitCode -eq 3) 'START_UNKNOWN_OR_FATAL_EXIT_DEFAULT_DENY'}
- $preTokenBlocked=Resolve-ThriveLensPreTokenStartObservation -StartExitCode 2 -DistroAbsent $true -HostPortAbsent $true
- A (-not $preTokenBlocked.Fatal -and $preTokenBlocked.ExitCode -eq 2 -and $preTokenBlocked.CleanupVerified) 'START_EXIT_TWO_READ_ONLY_ABSENCE_ACCEPTED'
- foreach($absenceCase in @(@($false,$true),@($true,$false),@($false,$false))){$preTokenFatal=Resolve-ThriveLensPreTokenStartObservation -StartExitCode 2 -DistroAbsent $absenceCase[0] -HostPortAbsent $absenceCase[1];A ($preTokenFatal.Fatal -and $preTokenFatal.ExitCode -eq 3 -and -not $preTokenFatal.CleanupVerified) 'START_EXIT_TWO_ABSENCE_UNVERIFIED_FATAL'}
- foreach($unexpectedExit in @(1,3,255)){$preTokenFatal=Resolve-ThriveLensPreTokenStartObservation -StartExitCode $unexpectedExit -DistroAbsent $true -HostPortAbsent $true;A ($preTokenFatal.Fatal -and $preTokenFatal.ExitCode -eq 3 -and -not $preTokenFatal.CleanupVerified) 'START_UNEXPECTED_EXIT_OBSERVATION_DEFAULT_DENY'}
- $preTokenBlockedFinal=Resolve-ThriveLensRuntimeCleanupOutcome -OriginalCode $preTokenBlocked.Code -OriginalExitCode $preTokenBlocked.ExitCode -CleanupRequired $true -CleanupAuthorityVerified $preTokenBlocked.CleanupVerified -CredentialCleanupRequired $false -CredentialRemoveFailed $false -CredentialAbsenceVerified $true -IdentityChanged $false -PostgresStopFailed $false -DistroTerminateFailed $false -DistroAbsenceCheckFailed $false -HostAbsenceCheckFailed $false -DistroAbsent $true -HostAbsent $true -LockReleaseFailed $false
- A ($preTokenBlockedFinal.CleanupVerified -and $preTokenBlockedFinal.Status -ceq 'BLOCKED' -and $preTokenBlockedFinal.ExitCode -eq 2) 'START_EXIT_TWO_COMPOSED_CLEANUP_TRUTH'
+ A ($module -notmatch 'Resolve-ThriveLens(?:ChildOutcome|StartChildExit|PreTokenStartObservation)' -and $runtimeModule -notmatch 'Resolve-ThriveLens(?:StartChildFailure|RuntimeFailureOutcome)') 'OLD_CHILD_AND_PRETOKEN_POLICY_REMOVED'
  foreach($interCycleCode in @('RESOURCE_INTER_CYCLE_MEMORY_NOT_SETTLED','RESOURCE_INTER_CYCLE_MEMORY_MEASUREMENT_UNAVAILABLE')){$interCycleOutcome=Resolve-ThriveLensRuntimeCleanupOutcome -OriginalCode $interCycleCode -OriginalExitCode 2 -CleanupRequired $false -CleanupAuthorityVerified $true -CredentialCleanupRequired $true -CredentialRemoveFailed $false -CredentialAbsenceVerified $true -IdentityChanged $false -PostgresStopFailed $false -DistroTerminateFailed $false -DistroAbsenceCheckFailed $false -HostAbsenceCheckFailed $false -DistroAbsent $true -HostAbsent $true -LockReleaseFailed $false;A ($interCycleOutcome.Status -ceq 'BLOCKED' -and $interCycleOutcome.Code -ceq $interCycleCode -and $interCycleOutcome.OriginalCode -ceq $interCycleCode -and $interCycleOutcome.ExitCode -eq 2 -and $interCycleOutcome.CleanupVerified -and @($interCycleOutcome.FailureStages) -ccontains 'RESOURCE_GATE') 'INTER_CYCLE_MEMORY_BLOCKED_COMPOSITION'}
- foreach($unexpectedExit in @(1,3,255)){$preTokenFatal=Resolve-ThriveLensPreTokenStartObservation -StartExitCode $unexpectedExit -DistroAbsent $true -HostPortAbsent $true;$preTokenFatalFinal=Resolve-ThriveLensRuntimeCleanupOutcome -OriginalCode $preTokenFatal.Code -OriginalExitCode $preTokenFatal.ExitCode -CleanupRequired $true -CleanupAuthorityVerified $preTokenFatal.CleanupVerified -CredentialCleanupRequired $false -CredentialRemoveFailed $false -CredentialAbsenceVerified $true -IdentityChanged $false -PostgresStopFailed $false -DistroTerminateFailed $false -DistroAbsenceCheckFailed $false -HostAbsenceCheckFailed $false -DistroAbsent $true -HostAbsent $true -LockReleaseFailed $false;A (-not $preTokenFatalFinal.CleanupVerified -and $preTokenFatalFinal.Status -ceq 'ERROR' -and $preTokenFatalFinal.ExitCode -eq 3 -and @($preTokenFatalFinal.FailureStages) -contains 'IDENTITY') 'START_UNEXPECTED_EXIT_COMPOSED_CLEANUP_DEFAULT_DENY'}
  foreach($safeCredentialFailure in @('WSL_COMMAND_TIMEOUT','WSL_OUTPUT_LIMIT_EXCEEDED','WSL_OUTPUT_DRAIN_INCOMPLETE','WSL_PROCESS_START_FAILED')){A (Test-ThriveLensCredentialAbsenceProbeAllowed -FailureCode $safeCredentialFailure) 'CREDENTIAL_CONTAINED_REMOVE_FAILURE_ALLOWS_ABSENCE_PROBE'}
  foreach($unsafeCredentialFailure in @('WSL_GUARDED_COMMAND_CONTAINMENT_FAILED','WSL_CLEANUP_IDENTITY_CHANGED','LIFECYCLE_LOCK_OWNERSHIP_REQUIRED','arbitrary secret text')){A (-not (Test-ThriveLensCredentialAbsenceProbeAllowed -FailureCode $unsafeCredentialFailure)) 'CREDENTIAL_UNSAFE_REMOVE_FAILURE_BLOCKS_ABSENCE_PROBE'}
  foreach($stopAuthorityCode in @('POSTGRES_STOP_FAILED','POSTGRES_CLUSTER_STILL_RUNNING','WSL_COMMAND_TIMEOUT')){A (Test-ThriveLensCleanupFailurePreservesIdentityAuthority -Stage 'POSTGRES_STOP' -FailureCode $stopAuthorityCode) 'POSTGRES_STOP_OPERATIONAL_FAILURE_RETAINS_OLD_TOKEN_AUTHORITY'}
@@ -351,7 +779,8 @@ try{
  A ($firstStagingGuard -ge 0 -and $activationMove -gt $firstStagingGuard) 'INITIALIZE_STAGING_GUARD_BEFORE_MOVE'
  A ($lastStagingGuard -gt $activationMove -and $rollbackDelete -gt $lastStagingGuard) 'INITIALIZE_STAGING_GUARD_BEFORE_ROLLBACK'
  $treeFunctionStart=$module.IndexOf('function Assert-ThriveLensLinuxTreePolicy');$treeFunctionEnd=$module.IndexOf('function Assert-ThriveLensLinuxPathPolicy',$treeFunctionStart);$treeFunctionBody=if($treeFunctionStart -ge 0 -and $treeFunctionEnd -gt $treeFunctionStart){$module.Substring($treeFunctionStart,$treeFunctionEnd-$treeFunctionStart)}else{''}
- A ($treeFunctionBody -match "Kind -ceq 'STAGING'.*LINUX_TREE_GUARD_REQUIRED" -and $treeFunctionBody -match 'Invoke-ThriveLensGuardedDistro -IdentityToken \$IdentityToken -LifecycleLock \$LifecycleLock') 'POST_MUTATION_TREE_SUPERVISOR_IDENTITY_FENCED'
+ A ($treeFunctionBody -match "Kind -ceq 'STAGING'.*LINUX_TREE_GUARD_REQUIRED" -and
+    $treeFunctionBody -match 'Invoke-ThriveLensDistroProbe\s+`?\s*-Contract\s+\$Contract\s+`?\s*-IdentityToken\s+\$IdentityToken\s+`?\s*-LifecycleLock\s+\$LifecycleLock') 'POST_MUTATION_TREE_SUPERVISOR_IDENTITY_FENCED'
  A ($initialize -match "fdinfo/'\+str\(fd\)" -and $initialize -match 'mount_id\(parentfd\) != trustedmount' -and $initialize -match 'rootmount != trustedmount' -and $initialize -match 'mount_id\(child\) != rootmount' -and $initialize -match 'mount_id\(leaf\) != rootmount' -and $initialize -notmatch 'shutil\.rmtree') 'INITIALIZE_FD_RELATIVE_MOUNT_FENCED_ROLLBACK'
  A ($activationAttempted -ge 0 -and $activationAttempted -lt $activationMove -and $initialize -match 'if\(\$activationAttempted -or \$activated\)\{\$fatalCleanup=\$true\}') 'INITIALIZE_ACTIVATION_ATTEMPT_FATAL'
  A ($initialize -match '\$null -ne \$staging -and -not \$activationAttempted -and -not \$activated') 'INITIALIZE_NO_ROLLBACK_AFTER_ACTIVATION_ATTEMPT'
@@ -359,20 +788,22 @@ try{
  $mutationMarker=$initialize.IndexOf('$mutated = $true');$directoryLoop=$initialize.IndexOf('foreach($directory');A ($mutationMarker -ge 0 -and $directoryLoop -gt $mutationMarker) 'INITIALIZE_MUTATION_TRACKED_BEFORE_DIRECTORY_CREATE'
  $validBranchStart=$initialize.IndexOf("if(`$clusterState -ceq 'VALID')");$validBranchEnd=$initialize.IndexOf("if(`$clusterState -cne 'ABSENT')",$validBranchStart);$validBranch=if($validBranchStart -ge 0 -and $validBranchEnd -gt $validBranchStart){$initialize.Substring($validBranchStart,$validBranchEnd-$validBranchStart)}else{''};A ($validBranch -match 'Stop-ThriveLensDistroAndVerify' -and $validBranch -match 'Assert-ThriveLensHostPortAbsent') 'INITIALIZE_IDEMPOTENT_CLEANUP'
  $startRaw=Get-Content (Join-Path $PSScriptRoot 'start.ps1') -Raw
- $startTokens=$null;$startErrors=$null;$startAst=[Management.Automation.Language.Parser]::ParseInput($startRaw,[ref]$startTokens,[ref]$startErrors);$startTries=@($startAst.FindAll({param($node)$node -is [Management.Automation.Language.TryStatementAst]},$true));$gracefulTries=@($startTries|Where-Object{$_.Body.Extent.Text -match 'Stop-ThriveLensPostgresUnderLock'});$forcedTries=@($startTries|Where-Object{$_.Body.Extent.Text -match 'Stop-ThriveLensDistroAndVerify'});$combinedTries=@($startTries|Where-Object{$_.Body.Extent.Text -match 'Stop-ThriveLensPostgresUnderLock' -and $_.Body.Extent.Text -match 'Stop-ThriveLensDistroAndVerify'})
- A (@($startErrors).Count -eq 0 -and $gracefulTries.Count -eq 1 -and $forcedTries.Count -eq 2 -and $combinedTries.Count -eq 0) 'START_INDEPENDENT_GRACEFUL_FORCED_CLEANUP'
- A ($startRaw -match '\$wslTouched=\$true' -and $startRaw -match 'elseif\(\$wslTouched\)') 'START_PRE_ATTEMPT_WSL_CLEANUP'
- A ($startRaw -notmatch 'Invoke-ThriveLensDistro' -and $startRaw -match 'Invoke-ThriveLensGuardedDistro') 'START_ONLY_GUARDED_DISTRO_MUTATION'
+ $startParsed=Get-ThriveLensParsedSource -Source $startRaw;$startAst=$startParsed.Ast;$startErrors=$startParsed.Errors
+ A (Test-ThriveLensStartAdapterContract -Source $startRaw) 'START_IN_PROCESS_TRANSACTION_CONTRACT'
+ A ($startRaw -notmatch 'Invoke-ThriveLensGuardedDistro|Assert-ThriveLensWslPackages|Get-ThriveLensWslClusterState') 'START_THIN_ADAPTER_NO_CORE_DUPLICATION'
  foreach($lifecycleFile in @('preflight.ps1','initialize.ps1','start.ps1','stop.ps1')){
   $lifecycleRaw=Get-Content (Join-Path $PSScriptRoot $lifecycleFile) -Raw
   $tokenIndex=$lifecycleRaw.IndexOf('Get-ThriveLensWslCleanupIdentityToken');$distroIndex=$lifecycleRaw.IndexOf('Assert-ThriveLensWslIdentity')
   A ($tokenIndex -ge 0 -and ($distroIndex -lt 0 -or $tokenIndex -lt $distroIndex)) ('IDENTITY_TOKEN_BEFORE_DISTRO_'+$lifecycleFile)
-  $unguardedTerminate=@($lifecycleRaw -split "`r?`n"|Where-Object{$_ -match 'Stop-ThriveLensDistroAndVerify' -and ($_ -notmatch '-IdentityToken\s+\$' -or $_ -notmatch '-LifecycleLock\s+\$')})
+  $lifecycleParsed=Get-ThriveLensParsedSource -Source $lifecycleRaw
+  $unguardedTerminate=@(Get-ThriveLensCommandAsts -Ast $lifecycleParsed.Ast -Name 'Stop-ThriveLensDistroAndVerify'|Where-Object{
+   $_.Extent.Text -notmatch '-IdentityToken\s+\$[A-Za-z_][A-Za-z0-9_]*' -or $_.Extent.Text -notmatch '-LifecycleLock\s+\$[A-Za-z_][A-Za-z0-9_]*'
+  })
   A ($unguardedTerminate.Count -eq 0) ('TERMINATE_TOKEN_ARGUMENTS_'+$lifecycleFile)
  }
  $stopRaw=Get-Content (Join-Path $PSScriptRoot 'stop.ps1') -Raw
  A ($stopRaw -match 'if\(\$null -ne \$lifecycleLock -and \$null -ne \$cleanupIdentityToken\)') 'STOP_LOCK_FAILURE_NEVER_TERMINATES'
- $stopFunctionStart=$module.IndexOf('function Stop-ThriveLensPostgresUnderLock');$stopFunctionEnd=$module.IndexOf('function Resolve-ThriveLensChildOutcome',$stopFunctionStart);$stopFunctionBody=if($stopFunctionStart -ge 0 -and $stopFunctionEnd -gt $stopFunctionStart){$module.Substring($stopFunctionStart,$stopFunctionEnd-$stopFunctionStart)}else{''}
+ $stopFunctionStart=$module.IndexOf('function Stop-ThriveLensPostgresUnderLock');$stopFunctionEnd=$module.IndexOf('function Resolve-ThriveLensRuntimePublicCode',$stopFunctionStart);$stopFunctionBody=if($stopFunctionStart -ge 0 -and $stopFunctionEnd -gt $stopFunctionStart){$module.Substring($stopFunctionStart,$stopFunctionEnd-$stopFunctionStart)}else{''}
  A ($stopFunctionBody -match 'IdentityToken' -and $stopFunctionBody -match 'LifecycleLock' -and $stopFunctionBody -match 'Assert-ThriveLensLifecycleLockOwnership' -and $stopFunctionBody -match 'Invoke-ThriveLensGuardedDistro') 'GRACEFUL_STOP_IDENTITY_FENCED'
  A ($stopFunctionBody -match 'Assert-ThriveLensWslAbsent' -and $stopFunctionBody -notmatch 'Assert-ThriveLensHostPortAbsent') 'GRACEFUL_STOP_GUEST_ABSENCE_ONLY'
  A ($terminateBody.IndexOf('Assert-ThriveLensDistroStopped') -ge 0 -and $terminateBody.IndexOf('Assert-ThriveLensHostPortAbsent') -gt $terminateBody.IndexOf('Assert-ThriveLensDistroStopped')) 'TERMINATE_FINAL_HOST_ABSENCE_ORDERED'
@@ -380,48 +811,62 @@ try{
  $runtimeTokens=$null;$runtimeParseErrors=$null;$runtimeAst=[Management.Automation.Language.Parser]::ParseInput($runtimeTest,[ref]$runtimeTokens,[ref]$runtimeParseErrors)
  $pseudoFinallyCommands=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'finally'},$true))
  A ($runtimeParseErrors.Count -eq 0 -and $pseudoFinallyCommands.Count -eq 0) 'RUNTIME_FINALLY_AST_BOUND'
- $boundaryFunctions=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Invoke-ThriveLensInterCycleBoundary'},$true))
- $boundaryDefinition=if($boundaryFunctions.Count -eq 1){$boundaryFunctions[0].Extent.Text}else{''}
- A ($boundaryFunctions.Count -eq 1 -and $boundaryDefinition -match '\[ref\]\$LifecycleLock' -and $boundaryDefinition -match '\[ref\]\$IdentityToken') 'INTER_CYCLE_BOUNDARY_PRIVATE_SEAM_PRESENT'
- $boundaryTestModule=New-Module -ArgumentList $boundaryDefinition -ScriptBlock {
- param([string]$Definition)
-  $script:Mode='SUCCESS';$script:Log=[Collections.Generic.List[string]]::new();$script:ForbiddenCalls=0
-  function Wait-ThriveLensInterCycleMemorySettle {param([int64]$MinimumFreeMemoryBytes)$script:Log.Add('WAIT');if($MinimumFreeMemoryBytes -ne 1073741824){throw 'SYNTHETIC_THRESHOLD_CHANGED'};if($script:Mode -cin @('WAIT_RESOURCE','WAIT_RELEASE_FAIL')){throw 'RESOURCE_INTER_CYCLE_MEMORY_NOT_SETTLED'};if($script:Mode -ceq 'WAIT_UNKNOWN'){throw 'untrusted raw wait failure'}}
-  function Exit-ThriveLensLifecycleLock {param($Mutex)$script:Log.Add('RELEASE');if($script:Mode -cin @('RELEASE_FAIL','WAIT_RELEASE_FAIL')){throw 'SYNTHETIC_RELEASE_FAILURE'}}
-  function Resolve-ThriveLensRuntimePublicCode {param([string]$Code)if($Code -cin @('RESOURCE_INTER_CYCLE_MEMORY_NOT_SETTLED','RESOURCE_INTER_CYCLE_MEMORY_MEASUREMENT_UNAVAILABLE','RUNTIME_TEST_INTERNAL_ERROR')){return $Code};return 'RUNTIME_TEST_INTERNAL_ERROR'}
-  function Invoke-ThriveLensGuardedDistro {$script:ForbiddenCalls++;throw 'FORBIDDEN_GUEST_CALL'}
-  function Stop-ThriveLensPostgresUnderLock {$script:ForbiddenCalls++;throw 'FORBIDDEN_STOP_CALL'}
-  function Stop-ThriveLensDistroAndVerify {$script:ForbiddenCalls++;throw 'FORBIDDEN_TERMINATE_CALL'}
- . ([scriptblock]::Create($Definition))
- Export-ModuleMember -Function 'Invoke-ThriveLensInterCycleBoundary'
+ $runtimeImportFailure=Invoke-ThriveLensRuntimeImportFailureHarness -Source $runtimeTest
+ A ($null -ne $runtimeImportFailure -and $runtimeImportFailure.schema_version -eq 2 -and $runtimeImportFailure.status -ceq 'ERROR' -and $runtimeImportFailure.code -ceq 'RUNTIME_TEST_INTERNAL_ERROR' -and $runtimeImportFailure.original_code -ceq 'RUNTIME_TEST_INTERNAL_ERROR' -and -not $runtimeImportFailure.cleanup_required -and -not $runtimeImportFailure.cleanup_verified -and -not $runtimeImportFailure.guest_cleanup_attempted -and -not $runtimeImportFailure.forced_termination_attempted -and -not $runtimeImportFailure.post_mutation_resource_gate_verified -and -not $runtimeImportFailure.configuration_lease_release_attempted -and -not $runtimeImportFailure.lifecycle_lock_release_attempted -and ($runtimeImportFailure|ConvertTo-Json -Compress) -notmatch 'synthetic|private|import failure') 'RUNTIME_IMPORT_FAILURE_CLOSED_WITHOUT_MODULE_CALLS_OR_RAW_TEXT'
+ $runtimeInitialDrain=Invoke-ThriveLensRuntimeInitialDrainHarness -Source $runtimeTest
+ A ($null -ne $runtimeInitialDrain -and $runtimeInitialDrain.schema_version -eq 2 -and $runtimeInitialDrain.status -ceq 'ERROR' -and $runtimeInitialDrain.code -ceq 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE' -and $runtimeInitialDrain.original_code -ceq 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE' -and -not $runtimeInitialDrain.cleanup_required -and -not $runtimeInitialDrain.cleanup_verified -and -not $runtimeInitialDrain.guest_cleanup_allowed -and -not $runtimeInitialDrain.guest_cleanup_attempted -and -not $runtimeInitialDrain.forced_termination_attempted -and -not $runtimeInitialDrain.post_mutation_resource_gate_verified -and -not $runtimeInitialDrain.configuration_lease_release_attempted -and -not $runtimeInitialDrain.lifecycle_lock_release_attempted) 'RUNTIME_INITIAL_RESOURCE_GATE_OUTPUT_DRAIN_FATAL_NO_MUTATION_OR_RETRY'
+ $clusterIdentityFunctions=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-ThriveLensPrivateClusterIdentityFingerprint'},$true));$clusterIdentityDefinition=if($clusterIdentityFunctions.Count -eq 1){$clusterIdentityFunctions[0].Extent.Text}else{''}
+ $identitySuccess=Invoke-ThriveLensClusterIdentityHarness -Definition $clusterIdentityDefinition -Mode 'SUCCESS';$syntheticIdentityBytes=[Text.Encoding]::ASCII.GetBytes('7234567890123456789');try{$expectedIdentityFingerprint=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($syntheticIdentityBytes))}finally{[Array]::Clear($syntheticIdentityBytes,0,$syntheticIdentityBytes.Length)}
+ A ($null -eq $identitySuccess.Code -and $identitySuccess.Bound -and $identitySuccess.Value -ceq $expectedIdentityFingerprint -and $identitySuccess.Value -cnotmatch '7234567890123456789' -and ($identitySuccess.Log -join ',') -ceq 'IDENTITY,PG_CONTROLDATA') 'RUNTIME_CLUSTER_IDENTITY_PRIVATE_HASH_ONLY'
+ foreach($identityFailureCase in @(@('EXIT','POSTGRES_SYSTEM_IDENTIFIER_PROBE_FAILED'),@('STDERR','POSTGRES_SYSTEM_IDENTIFIER_PROBE_FAILED'),@('DUPLICATE','POSTGRES_SYSTEM_IDENTIFIER_INVALID'),@('ZERO','POSTGRES_SYSTEM_IDENTIFIER_INVALID'),@('OVERFLOW','POSTGRES_SYSTEM_IDENTIFIER_INVALID'),@('MALFORMED','POSTGRES_SYSTEM_IDENTIFIER_INVALID'))){$identityFailure=Invoke-ThriveLensClusterIdentityHarness -Definition $clusterIdentityDefinition -Mode $identityFailureCase[0];A ($identityFailure.Code -ceq $identityFailureCase[1] -and $null -eq $identityFailure.Value -and $identityFailure.Bound) ('RUNTIME_CLUSTER_IDENTITY_'+$identityFailureCase[0]+'_FAILS_CLOSED')}
+ $wslParsed=Get-ThriveLensParsedSource -Source $module;$startCoreAst=Get-ThriveLensFunctionAst -Ast $wslParsed.Ast -Name 'Invoke-ThriveLensPostgresStartUnderLock';$startCoreDefinition=if($null -ne $startCoreAst){$startCoreAst.Extent.Text}else{''}
+ A (Test-ThriveLensStartCoreContract -Source $module) 'START_CORE_EXACT_TRANSACTION_CONTRACT'
+ $coreSuccess=Invoke-ThriveLensStartCoreHarness -Definition $startCoreDefinition -Mode 'SUCCESS'
+ $expectedCoreLog='LOCK,LEASE_ASSERT,FINGERPRINT,LEASE_CONTRACT,LEASE_RESOURCE,PATHS,RESOURCE,RAM,WSL_IDENTITY,PACKAGES,DISK,CLUSTER,PATH,WSL_ABSENT,HOST_ABSENT,RAM,LEASE_ASSERT,FINGERPRINT,WSL_IDENTITY,PG_CTL,WSL_LOOPBACK,HOST_LOOPBACK,RESOURCE'
+ A ($null -eq $coreSuccess.Code -and $coreSuccess.WslTouched -and $coreSuccess.StartAttempted -and $coreSuccess.StartCommitResourceGateVerified -and ($coreSuccess.Log -join ',') -ceq $expectedCoreLog) 'START_CORE_EXECUTABLE_EXACT_ORDER'
+ $coreEarly=Invoke-ThriveLensStartCoreHarness -Definition $startCoreDefinition -Mode 'EARLY_RESOURCE';A ($coreEarly.Code -ceq 'RESOURCE_GATE_FAILED' -and -not $coreEarly.WslTouched -and -not $coreEarly.StartAttempted -and -not $coreEarly.StartCommitResourceGateVerified -and ($coreEarly.Log -join ',') -ceq 'LOCK,LEASE_ASSERT,FINGERPRINT,LEASE_CONTRACT,LEASE_RESOURCE,PATHS,RESOURCE') 'START_CORE_EXECUTABLE_EARLY_FAILURE_FLAGS'
+ $coreMid=Invoke-ThriveLensStartCoreHarness -Definition $startCoreDefinition -Mode 'MID_PACKAGES';A ($coreMid.Code -ceq 'WSL_PACKAGE_MISMATCH' -and $coreMid.WslTouched -and -not $coreMid.StartAttempted -and ($coreMid.Log -join ',') -match 'WSL_IDENTITY,PACKAGES$') 'START_CORE_EXECUTABLE_MID_FAILURE_FLAGS'
+ $coreRam2=Invoke-ThriveLensStartCoreHarness -Definition $startCoreDefinition -Mode 'RAM2_LOW';A ($coreRam2.Code -ceq 'LOW_FREE_MEMORY_AFTER_WSL_PROBES' -and $coreRam2.WslTouched -and -not $coreRam2.StartAttempted -and ($coreRam2.Log -join ',') -match 'HOST_ABSENT,RAM$') 'START_CORE_EXECUTABLE_SECOND_RAM_FENCE'
+ $coreLeaseFence=Invoke-ThriveLensStartCoreHarness -Definition $startCoreDefinition -Mode 'COMMIT_LEASE_FAIL';A ($coreLeaseFence.Code -ceq 'CONFIGURATION_LEASE_CONTENT_CHANGED' -and $coreLeaseFence.WslTouched -and -not $coreLeaseFence.StartAttempted -and ($coreLeaseFence.Log -join ',') -match 'RAM,LEASE_ASSERT$') 'START_CORE_EXECUTABLE_COMMIT_LEASE_FENCE'
+ $coreStartFail=Invoke-ThriveLensStartCoreHarness -Definition $startCoreDefinition -Mode 'START_FAIL';A ($coreStartFail.Code -ceq 'POSTGRES_START_FAILED' -and $coreStartFail.WslTouched -and $coreStartFail.StartAttempted -and ($coreStartFail.Log -join ',') -match 'WSL_IDENTITY,PG_CTL$') 'START_CORE_EXECUTABLE_ATTEMPTED_ADJACENCY'
+ $corePost=Invoke-ThriveLensStartCoreHarness -Definition $startCoreDefinition -Mode 'POST_GATE';A ($corePost.Code -ceq 'POST_MUTATION_RESOURCE_GATE_FAILED' -and $corePost.WslTouched -and $corePost.StartAttempted -and -not $corePost.StartCommitResourceGateVerified -and ($corePost.Log -join ',') -match 'PG_CTL,WSL_LOOPBACK,HOST_LOOPBACK,RESOURCE$') 'START_CORE_EXECUTABLE_POST_START_FAILURE'
+
+ $adapterSuccess=Invoke-ThriveLensStartAdapterHarness -Source $startRaw -Mode 'SUCCESS';A ($null -ne $adapterSuccess.Adapter -and $adapterSuccess.Adapter.ExitCode -eq 0 -and $adapterSuccess.Adapter.Response.status -ceq 'STARTED' -and $adapterSuccess.Adapter.Response.port -eq 55439 -and $adapterSuccess.TokenCalls -eq 1 -and $adapterSuccess.SameToken -and $adapterSuccess.SameConfiguration -and ($adapterSuccess.Log -join ',') -ceq 'LOCK_ENTER,LEASE_ENTER,LEASE_ASSERT,CONTRACT,PATHS,TOKEN,CORE,LEASE_ASSERT,LEASE_RELEASE,LEASE_RELEASED,LOCK_RELEASE,LOCK_RELEASED') 'START_ADAPTER_EXECUTABLE_SUCCESS_REVERSE_DISPOSE_ORDER'
+ $startImportFailure=Invoke-ThriveLensStartImportFailureHarness -Source $startRaw;A ($null -ne $startImportFailure -and $startImportFailure.ExitCode -eq 3 -and $startImportFailure.Response.schema_version -eq 1 -and $startImportFailure.Response.status -ceq 'ERROR' -and $startImportFailure.Response.code -ceq 'POSTGRES_START_CLEANUP_FAILED' -and $startImportFailure.Response.original_code -ceq 'POSTGRES_START_INTERNAL_ERROR' -and -not $startImportFailure.Response.cleanup_required -and -not $startImportFailure.Response.cleanup_verified -and -not $startImportFailure.Response.guest_cleanup_attempted -and -not $startImportFailure.Response.forced_termination_attempted -and -not $startImportFailure.Response.configuration_lease_release_attempted -and -not $startImportFailure.Response.lifecycle_lock_release_attempted -and ($startImportFailure|ConvertTo-Json -Compress) -notmatch 'synthetic|private|import failure') 'START_IMPORT_FAILURE_CLOSED_WITHOUT_MODULE_CALLS_OR_RAW_TEXT'
+ $adapterPreLease=Invoke-ThriveLensStartAdapterHarness -Source $startRaw -Mode 'PRE_LEASE_FAIL';A ($adapterPreLease.Adapter.ExitCode -eq 3 -and $adapterPreLease.Adapter.Response.status -ceq 'ERROR' -and $adapterPreLease.Adapter.Response.code -ceq 'POSTGRES_START_CLEANUP_FAILED' -and $adapterPreLease.Adapter.Response.original_code -ceq 'CONFIGURATION_LEASE_OPEN_FAILED' -and -not $adapterPreLease.Adapter.Response.cleanup_required -and -not $adapterPreLease.Adapter.Response.cleanup_verified -and -not $adapterPreLease.Adapter.Response.post_mutation_resource_gate_verified -and $adapterPreLease.TokenCalls -eq 0 -and $adapterPreLease.SameToken -and $adapterPreLease.SameConfiguration -and @($adapterPreLease.Log) -notcontains 'CONTRACT' -and @($adapterPreLease.Log) -notcontains 'PATHS' -and @($adapterPreLease.Log) -notcontains 'DISTRO_ABSENT' -and @($adapterPreLease.Log) -notcontains 'HOST_ABSENT' -and @($adapterPreLease.Log) -notcontains 'FINAL_GATE' -and ($adapterPreLease.Log -join ',') -ceq 'LOCK_ENTER,LEASE_ENTER,GUEST_POLICY,LOCK_RELEASE,LOCK_RELEASED') 'START_ADAPTER_EXECUTABLE_PRE_LEASE_FAILURE_NO_CONFIGURATION_REREAD_OR_ABSENCE'
+ $adapterEarly=Invoke-ThriveLensStartAdapterHarness -Source $startRaw -Mode 'EARLY_FAIL';A ($adapterEarly.Adapter.ExitCode -eq 2 -and $adapterEarly.Adapter.Response.status -ceq 'BLOCKED' -and $adapterEarly.Adapter.Response.code -ceq 'RESOURCE_GATE_FAILED' -and -not $adapterEarly.Adapter.Response.cleanup_required -and $adapterEarly.Adapter.Response.cleanup_verified -and -not $adapterEarly.Adapter.Response.guest_cleanup_attempted -and -not $adapterEarly.Adapter.Response.forced_termination_attempted -and $adapterEarly.TokenCalls -eq 1 -and $adapterEarly.SameToken -and $adapterEarly.SameConfiguration -and @($adapterEarly.Log) -notcontains 'STOP' -and @($adapterEarly.Log) -notcontains 'FORCE' -and ($adapterEarly.Log -join ',') -match 'LEASE_RELEASE,LEASE_RELEASED,LOCK_RELEASE,LOCK_RELEASED$') 'START_ADAPTER_EXECUTABLE_EARLY_FAILURE'
+ $adapterMid=Invoke-ThriveLensStartAdapterHarness -Source $startRaw -Mode 'MID_FAIL';A ($adapterMid.Adapter.ExitCode -eq 2 -and $adapterMid.Adapter.Response.status -ceq 'BLOCKED' -and $adapterMid.Adapter.Response.code -ceq 'WSL_PACKAGE_MISMATCH' -and $adapterMid.Adapter.Response.cleanup_required -and $adapterMid.Adapter.Response.cleanup_verified -and -not $adapterMid.Adapter.Response.guest_cleanup_attempted -and $adapterMid.Adapter.Response.forced_termination_attempted -and $adapterMid.TokenCalls -eq 1 -and $adapterMid.SameToken -and $adapterMid.SameConfiguration -and @($adapterMid.Log) -contains 'FORCE' -and @($adapterMid.Log) -notcontains 'STOP') 'START_ADAPTER_EXECUTABLE_MID_SAME_TOKEN_CONTAINMENT'
+ $adapterPost=Invoke-ThriveLensStartAdapterHarness -Source $startRaw -Mode 'POST_FAIL';A ($adapterPost.Adapter.ExitCode -eq 3 -and $adapterPost.Adapter.Response.status -ceq 'ERROR' -and $adapterPost.Adapter.Response.code -ceq 'POST_MUTATION_RESOURCE_GATE_FAILED' -and $adapterPost.Adapter.Response.guest_cleanup_attempted -and $adapterPost.Adapter.Response.forced_termination_attempted -and $adapterPost.TokenCalls -eq 1 -and $adapterPost.SameToken -and $adapterPost.SameConfiguration -and ($adapterPost.Log -join ',') -match 'IDENTITY,STOP,IDENTITY,FORCE') 'START_ADAPTER_EXECUTABLE_POST_START_CONTAINMENT'
+ $adapterDrain=Invoke-ThriveLensStartAdapterHarness -Source $startRaw -Mode 'OUTPUT_DRAIN';A ($adapterDrain.Adapter.ExitCode -eq 3 -and $adapterDrain.Adapter.Response.status -ceq 'ERROR' -and $adapterDrain.Adapter.Response.code -ceq 'POST_MUTATION_RESOURCE_GATE_FAILED' -and $adapterDrain.Adapter.Response.original_code -ceq 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE' -and $adapterDrain.Adapter.Response.cleanup_required -and -not $adapterDrain.Adapter.Response.cleanup_verified -and -not $adapterDrain.Adapter.Response.guest_cleanup_allowed -and -not $adapterDrain.Adapter.Response.guest_cleanup_attempted -and $adapterDrain.Adapter.Response.forced_termination_attempted -and -not $adapterDrain.Adapter.Response.post_mutation_resource_gate_verified -and $adapterDrain.SameToken -and $adapterDrain.SameConfiguration -and @($adapterDrain.Log) -notcontains 'STOP' -and @($adapterDrain.Log) -notcontains 'FINAL_GATE' -and ($adapterDrain.Log -join ',') -match 'GUEST_POLICY,IDENTITY,IDENTITY,FORCE,DISTRO_ABSENT,HOST_ABSENT,LEASE_RELEASE,LEASE_RELEASED,LOCK_RELEASE,LOCK_RELEASED$') 'START_ADAPTER_OUTPUT_DRAIN_CONTAINMENT_WITHOUT_GUEST_OR_RERUN'
+ $initialResourceCodes=@('RESOURCE_GATE_UNAVAILABLE','RESOURCE_GATE_FAILED','RESOURCE_GATE_RESULT_INVALID','RESOURCE_GATE_MANIFEST_INVALID','RESOURCE_GATE_PROCESS_START_FAILED','RESOURCE_GATE_TIMEOUT','RESOURCE_GATE_OUTPUT_LIMIT','WSL_STANDARD_INPUT_INVALID','WSL_STANDARD_INPUT_LIMIT_EXCEEDED')
+ foreach($initialResourceCode in $initialResourceCodes){
+  $startResourceFailure=Invoke-ThriveLensStartAdapterHarness -Source $startRaw -Mode $initialResourceCode
+  A ($startResourceFailure.Adapter.ExitCode -eq 2 -and $startResourceFailure.Adapter.Response.status -ceq 'BLOCKED' -and $startResourceFailure.Adapter.Response.code -ceq $initialResourceCode -and $startResourceFailure.Adapter.Response.original_code -ceq $initialResourceCode -and -not $startResourceFailure.Adapter.Response.cleanup_required -and $startResourceFailure.Adapter.Response.cleanup_verified -and -not $startResourceFailure.Adapter.Response.guest_cleanup_attempted -and -not $startResourceFailure.Adapter.Response.forced_termination_attempted -and -not $startResourceFailure.Adapter.Response.post_mutation_resource_gate_verified -and @($startResourceFailure.Log) -notcontains 'STOP' -and @($startResourceFailure.Log) -notcontains 'FORCE' -and @($startResourceFailure.Log) -notcontains 'FINAL_GATE') ('START_INITIAL_'+$initialResourceCode+'_BLOCKED_PARITY')
+  $runtimeResourceFailure=Resolve-ThriveLensRuntimeCleanupOutcome -OriginalCode $initialResourceCode -OriginalExitCode 2 -CleanupRequired $false -CleanupAuthorityVerified $true -CredentialCleanupRequired $false -CredentialRemoveFailed $false -CredentialAbsenceVerified $true -IdentityChanged $false -PostgresStopFailed $false -DistroTerminateFailed $false -DistroAbsenceCheckFailed $false -HostAbsenceCheckFailed $false -DistroAbsent $true -HostAbsent $true -LockReleaseFailed $false
+  A ($runtimeResourceFailure.ExitCode -eq 2 -and $runtimeResourceFailure.Status -ceq 'BLOCKED' -and $runtimeResourceFailure.Code -ceq $initialResourceCode -and $runtimeResourceFailure.OriginalCode -ceq $initialResourceCode -and $runtimeResourceFailure.CleanupVerified) ('RUNTIME_INITIAL_'+$initialResourceCode+'_BLOCKED_PARITY')
  }
- try{
-  $runBoundaryCase={param([string]$Mode)& $boundaryTestModule {param($Mode)$script:Mode=$Mode;$script:Log.Clear();$script:ForbiddenCalls=0;$lock=[pscustomobject]@{Name='synthetic-lock'};$token=[pscustomobject]@{Name='synthetic-token'};$result=Invoke-ThriveLensInterCycleBoundary -MinimumFreeMemoryBytes 1073741824 -LifecycleLock ([ref]$lock) -IdentityToken ([ref]$token);[pscustomobject]@{Result=$result;Log=@($script:Log);ForbiddenCalls=$script:ForbiddenCalls;Lock=$lock;Token=$token}} $Mode}
-  $boundarySuccess=& $runBoundaryCase 'SUCCESS';A ($boundarySuccess.Result.Continue -and $null -eq $boundarySuccess.Result.OriginalCode -and $boundarySuccess.Result.ExitCode -eq 0 -and -not $boundarySuccess.Result.LockReleaseFailed -and ($boundarySuccess.Log -join ',') -ceq 'WAIT,RELEASE' -and $boundarySuccess.ForbiddenCalls -eq 0 -and $null -eq $boundarySuccess.Lock -and $null -eq $boundarySuccess.Token) 'INTER_CYCLE_BOUNDARY_SUCCESS_EXACT_ORDER'
-  $boundaryWait=& $runBoundaryCase 'WAIT_RESOURCE';A (-not $boundaryWait.Result.Continue -and $boundaryWait.Result.OriginalCode -ceq 'RESOURCE_INTER_CYCLE_MEMORY_NOT_SETTLED' -and $boundaryWait.Result.ExitCode -eq 2 -and -not $boundaryWait.Result.LockReleaseFailed -and ($boundaryWait.Log -join ',') -ceq 'WAIT,RELEASE' -and $boundaryWait.ForbiddenCalls -eq 0 -and $null -eq $boundaryWait.Lock -and $null -eq $boundaryWait.Token) 'INTER_CYCLE_BOUNDARY_RESOURCE_WAIT_BLOCKS_SECOND_START'
-  $boundaryUnknown=& $runBoundaryCase 'WAIT_UNKNOWN';A (-not $boundaryUnknown.Result.Continue -and $boundaryUnknown.Result.OriginalCode -ceq 'RUNTIME_TEST_INTERNAL_ERROR' -and $boundaryUnknown.Result.ExitCode -eq 3 -and ($boundaryUnknown.Log -join ',') -ceq 'WAIT,RELEASE') 'INTER_CYCLE_BOUNDARY_UNKNOWN_FATAL'
-  $boundaryRelease=& $runBoundaryCase 'RELEASE_FAIL';A (-not $boundaryRelease.Result.Continue -and $boundaryRelease.Result.OriginalCode -ceq 'RUNTIME_TEST_INTERNAL_ERROR' -and $boundaryRelease.Result.ExitCode -eq 3 -and $boundaryRelease.Result.LockReleaseFailed -and ($boundaryRelease.Log -join ',') -ceq 'WAIT,RELEASE' -and $null -eq $boundaryRelease.Lock -and $null -eq $boundaryRelease.Token) 'INTER_CYCLE_BOUNDARY_RELEASE_ONLY_FATAL'
-  $boundaryCombined=& $runBoundaryCase 'WAIT_RELEASE_FAIL';A (-not $boundaryCombined.Result.Continue -and $boundaryCombined.Result.OriginalCode -ceq 'RESOURCE_INTER_CYCLE_MEMORY_NOT_SETTLED' -and $boundaryCombined.Result.ExitCode -eq 3 -and $boundaryCombined.Result.LockReleaseFailed -and ($boundaryCombined.Log -join ',') -ceq 'WAIT,RELEASE' -and $boundaryCombined.ForbiddenCalls -eq 0 -and $null -eq $boundaryCombined.Lock -and $null -eq $boundaryCombined.Token) 'INTER_CYCLE_BOUNDARY_WAIT_RELEASE_FAILURE_PRESERVED'
-  $boundaryBlockedOutcome=Resolve-ThriveLensRuntimeCleanupOutcome -OriginalCode $boundaryWait.Result.OriginalCode -OriginalExitCode $boundaryWait.Result.ExitCode -CleanupRequired $false -CleanupAuthorityVerified $true -CredentialCleanupRequired $true -CredentialRemoveFailed $false -CredentialAbsenceVerified $true -IdentityChanged $false -PostgresStopFailed $false -DistroTerminateFailed $false -DistroAbsenceCheckFailed $false -HostAbsenceCheckFailed $false -DistroAbsent $true -HostAbsent $true -LockReleaseFailed $boundaryWait.Result.LockReleaseFailed
-  A ($boundaryBlockedOutcome.Status -ceq 'BLOCKED' -and $boundaryBlockedOutcome.Code -ceq 'RESOURCE_INTER_CYCLE_MEMORY_NOT_SETTLED' -and $boundaryBlockedOutcome.ExitCode -eq 2 -and $boundaryBlockedOutcome.CleanupVerified -and ($boundaryBlockedOutcome.FailureStages -join ',') -ceq 'RESOURCE_GATE') 'INTER_CYCLE_BOUNDARY_BLOCKED_COMPOSITION_EXACT'
-  $boundaryFatalOutcome=Resolve-ThriveLensRuntimeCleanupOutcome -OriginalCode $boundaryCombined.Result.OriginalCode -OriginalExitCode $boundaryCombined.Result.ExitCode -CleanupRequired $false -CleanupAuthorityVerified $true -CredentialCleanupRequired $true -CredentialRemoveFailed $false -CredentialAbsenceVerified $true -IdentityChanged $false -PostgresStopFailed $false -DistroTerminateFailed $false -DistroAbsenceCheckFailed $false -HostAbsenceCheckFailed $false -DistroAbsent $true -HostAbsent $true -LockReleaseFailed $boundaryCombined.Result.LockReleaseFailed
-  A ($boundaryFatalOutcome.Status -ceq 'ERROR' -and $boundaryFatalOutcome.Code -ceq 'RUNTIME_LOCK_RELEASE_FAILED' -and $boundaryFatalOutcome.OriginalCode -ceq 'RESOURCE_INTER_CYCLE_MEMORY_NOT_SETTLED' -and $boundaryFatalOutcome.ExitCode -eq 3 -and $boundaryFatalOutcome.CleanupVerified -and ($boundaryFatalOutcome.FailureStages -join ',') -ceq 'RESOURCE_GATE,LOCK_RELEASE') 'INTER_CYCLE_BOUNDARY_WAIT_RELEASE_COMPOSITION_EXACT'
- }finally{Remove-Module $boundaryTestModule -Force -ErrorAction SilentlyContinue}
+ $initialDrain=Invoke-ThriveLensStartAdapterHarness -Source $startRaw -Mode 'INITIAL_OUTPUT_DRAIN';A ($initialDrain.Adapter.ExitCode -eq 3 -and $initialDrain.Adapter.Response.status -ceq 'ERROR' -and $initialDrain.Adapter.Response.code -ceq 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE' -and $initialDrain.Adapter.Response.original_code -ceq 'RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE' -and -not $initialDrain.Adapter.Response.cleanup_required -and -not $initialDrain.Adapter.Response.cleanup_verified -and -not $initialDrain.Adapter.Response.guest_cleanup_allowed -and -not $initialDrain.Adapter.Response.guest_cleanup_attempted -and -not $initialDrain.Adapter.Response.forced_termination_attempted -and -not $initialDrain.Adapter.Response.post_mutation_resource_gate_verified -and @($initialDrain.Log) -notcontains 'STOP' -and @($initialDrain.Log) -notcontains 'FORCE' -and @($initialDrain.Log) -notcontains 'FINAL_GATE') 'START_INITIAL_RESOURCE_GATE_OUTPUT_DRAIN_FATAL_NO_MUTATION_OR_RETRY'
+ $adapterFinalGate=Invoke-ThriveLensStartAdapterHarness -Source $startRaw -Mode 'FINAL_GATE_FAIL';A ($adapterFinalGate.Adapter.ExitCode -eq 3 -and $adapterFinalGate.Adapter.Response.code -ceq 'POST_MUTATION_RESOURCE_GATE_FAILED' -and -not $adapterFinalGate.Adapter.Response.post_mutation_resource_gate_verified -and $adapterFinalGate.Adapter.Response.guest_cleanup_attempted -and $adapterFinalGate.Adapter.Response.forced_termination_attempted -and $adapterFinalGate.SameToken -and $adapterFinalGate.SameConfiguration -and ($adapterFinalGate.Log -join ',') -match 'STOP,IDENTITY,FORCE,DISTRO_ABSENT,HOST_ABSENT,FINAL_GATE,LEASE_RELEASE,LEASE_RELEASED,LOCK_RELEASE,LOCK_RELEASED$') 'START_ADAPTER_FINAL_GATE_FAILURE_AFTER_CONTAINMENT'
+ $adapterStopFail=Invoke-ThriveLensStartAdapterHarness -Source $startRaw -Mode 'STOP_FAIL';A ($adapterStopFail.Adapter.ExitCode -eq 3 -and $adapterStopFail.Adapter.Response.code -ceq 'POSTGRES_START_CLEANUP_FAILED' -and $adapterStopFail.Adapter.Response.guest_cleanup_attempted -and $adapterStopFail.Adapter.Response.forced_termination_attempted -and $adapterStopFail.TokenCalls -eq 1 -and $adapterStopFail.SameToken -and $adapterStopFail.SameConfiguration -and ($adapterStopFail.Log -join ',') -match 'STOP,IDENTITY,FORCE') 'START_ADAPTER_EXECUTABLE_FORCED_AFTER_STOP_FAILURE'
+ $adapterLockRelease=Invoke-ThriveLensStartAdapterHarness -Source $startRaw -Mode 'LOCK_RELEASE_FAIL';A ($adapterLockRelease.Adapter.ExitCode -eq 3 -and $adapterLockRelease.Adapter.Response.status -ceq 'ERROR' -and $adapterLockRelease.Adapter.Response.code -ceq 'POST_MUTATION_RESOURCE_GATE_FAILED' -and $adapterLockRelease.Adapter.Response.original_code -ceq 'POSTGRES_START_LOCK_RELEASE_FAILED' -and -not $adapterLockRelease.Adapter.Response.guest_cleanup_attempted -and $adapterLockRelease.Adapter.Response.forced_termination_attempted -and -not $adapterLockRelease.Adapter.Response.post_mutation_resource_gate_verified -and $adapterLockRelease.Adapter.Response.configuration_lease_released -and $adapterLockRelease.Adapter.Response.lifecycle_lock_release_attempted -and -not $adapterLockRelease.Adapter.Response.lifecycle_lock_released -and $adapterLockRelease.TokenCalls -eq 1 -and $adapterLockRelease.SameToken -and $adapterLockRelease.SameConfiguration -and ($adapterLockRelease.Log -join ',') -match 'LEASE_RELEASED,LOCK_RELEASE,GUEST_POLICY,IDENTITY,IDENTITY,FORCE,DISTRO_ABSENT,HOST_ABSENT$') 'START_ADAPTER_EXECUTABLE_LOCK_RELEASE_FAILURE_TRUTH'
+ $adapterLeaseRelease=Invoke-ThriveLensStartAdapterHarness -Source $startRaw -Mode 'LEASE_RELEASE_FAIL';A ($adapterLeaseRelease.Adapter.ExitCode -eq 3 -and $adapterLeaseRelease.Adapter.Response.status -ceq 'ERROR' -and $adapterLeaseRelease.Adapter.Response.code -ceq 'POST_MUTATION_RESOURCE_GATE_FAILED' -and $adapterLeaseRelease.Adapter.Response.original_code -ceq 'POSTGRES_START_CONFIGURATION_LEASE_RELEASE_FAILED' -and -not $adapterLeaseRelease.Adapter.Response.guest_cleanup_attempted -and $adapterLeaseRelease.Adapter.Response.forced_termination_attempted -and -not $adapterLeaseRelease.Adapter.Response.post_mutation_resource_gate_verified -and $adapterLeaseRelease.Adapter.Response.configuration_lease_release_attempted -and -not $adapterLeaseRelease.Adapter.Response.configuration_lease_released -and $adapterLeaseRelease.Adapter.Response.lifecycle_lock_released -and $adapterLeaseRelease.TokenCalls -eq 1 -and $adapterLeaseRelease.SameToken -and $adapterLeaseRelease.SameConfiguration -and (@($adapterLeaseRelease.Log|Where-Object{$_ -ceq 'LEASE_RELEASE'}).Count -eq 1) -and ($adapterLeaseRelease.Log -join ',') -match 'LEASE_RELEASE,GUEST_POLICY,IDENTITY,IDENTITY,FORCE,DISTRO_ABSENT,HOST_ABSENT,LOCK_RELEASE,LOCK_RELEASED$') 'START_ADAPTER_EXECUTABLE_LEASE_RELEASE_FAILURE_TRUTH'
  $credentialFunctionStart=$runtimeTest.IndexOf('function Remove-ThriveLensRuntimeCredential');$credentialFunctionEnd=$runtimeTest.IndexOf('function Assert-ThriveLensAuthenticatedScalar',$credentialFunctionStart);$credentialFunctionBody=if($credentialFunctionStart -ge 0 -and $credentialFunctionEnd -gt $credentialFunctionStart){$runtimeTest.Substring($credentialFunctionStart,$credentialFunctionEnd-$credentialFunctionStart)}else{''}
- $removeCatchIndex=$credentialFunctionBody.IndexOf('$removeRawCode=');$absenceProbeIndex=$credentialFunctionBody.IndexOf("Invoke-ThriveLensGuardedDistro -IdentityToken `$IdentityToken -LifecycleLock `$LifecycleLock -Arguments @('/usr/bin/test'",$removeCatchIndex);$credentialResolverIndex=$credentialFunctionBody.IndexOf('Resolve-ThriveLensCredentialCleanupResult',$absenceProbeIndex)
+ $removeCatchIndex=$credentialFunctionBody.IndexOf('$removeRawCode=');$absenceProbeIndex=$credentialFunctionBody.IndexOf("Invoke-ThriveLensGuardedDistro -IdentityToken `$IdentityToken -LifecycleLock `$LifecycleLock -Contract `$Contract -Arguments @('/usr/bin/test'",$removeCatchIndex);$credentialResolverIndex=if($absenceProbeIndex -ge 0){$credentialFunctionBody.IndexOf('Resolve-ThriveLensCredentialCleanupResult',$absenceProbeIndex)}else{-1}
  A ($removeCatchIndex -ge 0 -and $absenceProbeIndex -gt $removeCatchIndex -and $credentialResolverIndex -gt $absenceProbeIndex -and $credentialFunctionBody -match 'Test-ThriveLensCredentialAbsenceProbeAllowed') 'CREDENTIAL_REMOVE_FAILURE_THEN_BOUNDED_ABSENCE_FLOW'
  $credentialTestModule=New-Module -ArgumentList $credentialFunctionBody -ScriptBlock {
   param([string]$Definition)
-  $script:Scenario='SUCCESS';$script:IdentityAssertCalls=0;$script:GuardedCalls=0;$script:CallLog=[Collections.Generic.List[string]]::new()
+  $script:Scenario='SUCCESS';$script:IdentityAssertCalls=0;$script:GuardedCalls=0;$script:ConfigurationPreserved=$true;$script:CallLog=[Collections.Generic.List[string]]::new();$script:ExpectedContract=$null
   function Assert-ThriveLensWslCleanupIdentity {
-   param($IdentityToken,$LifecycleLock)
+   param($IdentityToken,$LifecycleLock,$Contract)
    $script:IdentityAssertCalls++
+   if(-not [object]::ReferenceEquals($Contract,$script:ExpectedContract)){$script:ConfigurationPreserved=$false;throw 'SYNTHETIC_CONFIGURATION_CHANGED'}
    $assertFailures=@{ASSERT_IDENTITY='WSL_CLEANUP_IDENTITY_CHANGED';ASSERT_LOCK='LIFECYCLE_LOCK_OWNERSHIP_REQUIRED';ASSERT_CONTAINMENT='WSL_GUARDED_COMMAND_CONTAINMENT_FAILED';ASSERT_UNKNOWN='untrusted raw failure'}
    if($assertFailures.ContainsKey($script:Scenario)){throw $assertFailures[$script:Scenario]}
    return $true
   }
   function Invoke-ThriveLensGuardedDistro {
-   param($IdentityToken,$LifecycleLock,[string[]]$Arguments)
+   param($IdentityToken,$LifecycleLock,$Contract,[string[]]$Arguments)
+   if(-not [object]::ReferenceEquals($Contract,$script:ExpectedContract)){$script:ConfigurationPreserved=$false;throw 'SYNTHETIC_CONFIGURATION_CHANGED'}
    $script:GuardedCalls++;$script:CallLog.Add(($Arguments[0]+'|'+$Arguments[-1]))
    if($Arguments[0] -ceq '/usr/bin/rm'){
     $removeFailures=@{
@@ -444,7 +889,7 @@ try{
  $credentialTestLock=[Threading.Mutex]::new($false)
  try{
   $credentialPath='/run/thrivelens-r0-auth-0123456789abcdef0123456789abcdef.pgpass'
-  $runCredentialCase={param([string]$scenario)& $credentialTestModule {param($scenario,$token,$lock,$path)$script:Scenario=$scenario;$script:IdentityAssertCalls=0;$script:GuardedCalls=0;$script:CallLog.Clear();$result=Remove-ThriveLensRuntimeCredential -Path $path -IdentityToken $token -LifecycleLock $lock;[pscustomobject]@{Result=$result;IdentityCalls=$script:IdentityAssertCalls;GuardedCalls=$script:GuardedCalls;Log=@($script:CallLog)}} $scenario $identityToken $credentialTestLock $credentialPath}
+  $runCredentialCase={param([string]$scenario)& $credentialTestModule {param($scenario,$token,$lock,$path)$script:Scenario=$scenario;$script:IdentityAssertCalls=0;$script:GuardedCalls=0;$script:ConfigurationPreserved=$true;$script:CallLog.Clear();$script:ExpectedContract=[pscustomobject]@{Name='contract'};$paths=[pscustomobject]@{Name='paths'};$result=Remove-ThriveLensRuntimeCredential -Path $path -IdentityToken $token -LifecycleLock $lock -Contract $script:ExpectedContract -Paths $paths;[pscustomobject]@{Result=$result;IdentityCalls=$script:IdentityAssertCalls;GuardedCalls=$script:GuardedCalls;ConfigurationPreserved=$script:ConfigurationPreserved;Log=@($script:CallLog)}} $scenario $identityToken $credentialTestLock $credentialPath}
   $successCase=& $runCredentialCase 'SUCCESS';A ($successCase.Result.RemoveSucceeded -and $successCase.Result.CredentialAbsenceVerified -and $successCase.IdentityCalls -eq 2 -and $successCase.GuardedCalls -eq 2 -and ($successCase.Log -join ',') -ceq ("/usr/bin/rm|$credentialPath,/usr/bin/test|$credentialPath")) 'CREDENTIAL_EXECUTABLE_SUCCESS_EXACT_ORDER'
   $removeExitCase=& $runCredentialCase 'REMOVE_EXIT_ONE';A (-not $removeExitCase.Result.RemoveSucceeded -and $removeExitCase.Result.CredentialAbsenceVerified -and $removeExitCase.Result.FailureCode -ceq 'AUTH_FILE_CLEANUP_REMOVE_FAILED' -and $removeExitCase.Result.RootFailureCode -ceq 'AUTH_FILE_CLEANUP_REMOVE_FAILED' -and $removeExitCase.IdentityCalls -eq 2 -and $removeExitCase.GuardedCalls -eq 2) 'CREDENTIAL_EXECUTABLE_REMOVE_EXIT_THEN_ABSENCE'
   $safeFailureCodes=@{REMOVE_TIMEOUT='WSL_COMMAND_TIMEOUT';REMOVE_OUTPUT_LIMIT='WSL_OUTPUT_LIMIT_EXCEEDED';REMOVE_DRAIN='WSL_OUTPUT_DRAIN_INCOMPLETE';REMOVE_START='WSL_PROCESS_START_FAILED'}
@@ -464,8 +909,8 @@ try{
  A ($runtimeTest -match 'SCRAM_VERIFIER_PROBE_FAILED') 'RUNTIME_VERIFIER_MARKER'
  A ($runtimeTest -match 'Resolve-ThriveLensWrongPasswordProbe' -and $runtimeTest -match 'CapturePrivateStandardError' -and $runtimeTest -match "'LC_ALL=C'") 'RUNTIME_WRONG_PASSWORD_CLASSIFIER'
  $guardedCalls=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Invoke-ThriveLensGuardedDistro'},$true))
- $positiveProbeTokens=@("'/usr/sbin/runuser'","'-u'","'postgres'","'--'","'/usr/bin/env'","'-i'",'"PGPASSFILE=$AuthFile"',"'PGCONNECT_TIMEOUT=5'","'PGREQUIREAUTH=scram-sha-256'","'/usr/bin/psql'","'-X'","'-w'","'-h'","'127.0.0.1'","'-p'","'55432'","'-U'","'tl_bootstrap'","'-d'","'postgres'","'-Atq'","'--set=ON_ERROR_STOP=1'","'--command'",'$Sql')
- $wrongProbeTokens=@("'/usr/sbin/runuser'","'-u'","'postgres'","'--'","'/usr/bin/env'","'-i'","'LC_ALL=C'","'LANG=C'",'"PGPASSFILE=$wrongAuthFile"',"'PGCONNECT_TIMEOUT=5'","'PGREQUIREAUTH=scram-sha-256'","'/usr/bin/psql'","'-X'","'-w'","'-h'","'127.0.0.1'","'-p'","'55432'","'-U'","'tl_bootstrap'","'-d'","'postgres'","'-Atq'","'--set=ON_ERROR_STOP=1'","'--command'","'SELECT 1'")
+ $positiveProbeTokens=@("'/usr/sbin/runuser'","'-u'","'postgres'","'--'","'/usr/bin/env'","'-i'",'"PGPASSFILE=$AuthFile"',"'PGCONNECT_TIMEOUT=5'","'PGREQUIREAUTH=scram-sha-256'","'/usr/bin/psql'","'-X'","'-w'","'-h'","'127.0.0.1'","'-p'",'([string]$Paths.Port)',"'-U'","'tl_bootstrap'","'-d'","'postgres'","'-Atq'","'--set=ON_ERROR_STOP=1'","'--command'",'$Sql')
+ $wrongProbeTokens=@("'/usr/sbin/runuser'","'-u'","'postgres'","'--'","'/usr/bin/env'","'-i'","'LC_ALL=C'","'LANG=C'",'"PGPASSFILE=$wrongAuthFile"',"'PGCONNECT_TIMEOUT=5'","'PGREQUIREAUTH=scram-sha-256'","'/usr/bin/psql'","'-X'","'-w'","'-h'","'127.0.0.1'","'-p'",'([string]$leasedPaths.Port)',"'-U'","'tl_bootstrap'","'-d'","'postgres'","'-Atq'","'--set=ON_ERROR_STOP=1'","'--command'","'SELECT 1'")
  $wrongInstallTokens=@("'/usr/bin/install'","'-o'","'postgres'","'-g'","'postgres'","'-m'","'0600'","'/dev/stdin'",'$wrongAuthFile')
  $positiveProbeCalls=@($guardedCalls|Where-Object{((Get-ArrayArgumentTokenText -Command $_ -ParameterName 'Arguments')-join "`n") -ceq ($positiveProbeTokens-join "`n")})
  $wrongProbeCalls=@($guardedCalls|Where-Object{((Get-ArrayArgumentTokenText -Command $_ -ParameterName 'Arguments')-join "`n") -ceq ($wrongProbeTokens-join "`n")})
@@ -481,44 +926,105 @@ try{
  $wrongClassifierCalls=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Resolve-ThriveLensWrongPasswordProbe' -and $node.Extent.Text -match '-ExpectedPasswordFile\s+\$wrongAuthFile(?:\s|$)'},$true))
  $wrongClears=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$wrongAuthFile' -and $node.Right.Extent.Text -ceq '$null'},$true)|Where-Object{$_.Extent.StartOffset -gt $wrongInstallAst.Extent.StartOffset})
  A ($wrongRemoveCalls.Count -eq 1 -and $wrongClassifierCalls.Count -eq 1 -and $wrongClears.Count -ge 1 -and $wrongInstallAst.Extent.StartOffset -lt $wrongProbeAst.Extent.StartOffset -and $wrongProbeAst.Extent.StartOffset -lt $wrongRemoveCalls[0].Extent.StartOffset -and $wrongRemoveCalls[0].Extent.StartOffset -lt $wrongClassifierCalls[0].Extent.StartOffset -and $wrongClassifierCalls[0].Extent.StartOffset -lt $wrongClears[0].Extent.StartOffset -and $runtimeTest.Substring($wrongInstallAst.Extent.StartOffset,$wrongClassifierCalls[0].Extent.StartOffset-$wrongInstallAst.Extent.StartOffset) -notmatch '\$wrongAuthFile\s*=\s*\$null') 'RUNTIME_WRONG_PASSWORD_PATH_PRIVATE_LIFETIME'
- $runtimeStartIndex=$runtimeTest.IndexOf('$started=$true;$start=');$probeLockIndex=$runtimeTest.IndexOf('$probeLifecycleLock=Enter-ThriveLensLifecycleLock',$runtimeStartIndex);$probeTokenIndex=$runtimeTest.IndexOf('$probeIdentityToken=Get-ThriveLensWslCleanupIdentityToken',$probeLockIndex);$firstRuntimeDistroIndex=$runtimeTest.IndexOf('Assert-ThriveLensClusterScramConfig',$runtimeStartIndex);$successStopIndex=$runtimeTest.IndexOf('$wasRunning=Stop-ThriveLensPostgresUnderLock',$probeTokenIndex);$successTerminateIndex=$runtimeTest.IndexOf('Stop-ThriveLensDistroAndVerify -IdentityToken $probeIdentityToken',$successStopIndex);$successDistroAbsenceIndex=$runtimeTest.IndexOf('Assert-ThriveLensDistroStopped',$successTerminateIndex);$successHostAbsenceIndex=$runtimeTest.IndexOf('Assert-ThriveLensHostPortAbsent',$successDistroAbsenceIndex);$successStartedFalseIndex=$runtimeTest.IndexOf('$started = $false',$successHostAbsenceIndex);$successBoundaryIndex=$runtimeTest.IndexOf('$interCycleBoundary = Invoke-ThriveLensInterCycleBoundary',$successStartedFalseIndex);$successContinueGuardIndex=$runtimeTest.IndexOf('if (-not [bool]$interCycleBoundary.Continue)',$successBoundaryIndex);$successContinueIndex=$runtimeTest.IndexOf('continue',$successContinueGuardIndex);$cycleTwoReleaseIndex=$runtimeTest.IndexOf('Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock',$successContinueIndex)
- A ($probeLockIndex -gt $runtimeStartIndex -and $probeTokenIndex -gt $probeLockIndex -and $firstRuntimeDistroIndex -gt $probeTokenIndex -and $successStopIndex -gt $firstRuntimeDistroIndex -and $successTerminateIndex -gt $successStopIndex -and $successDistroAbsenceIndex -gt $successTerminateIndex -and $successHostAbsenceIndex -gt $successDistroAbsenceIndex -and $successStartedFalseIndex -gt $successHostAbsenceIndex -and $successBoundaryIndex -gt $successStartedFalseIndex -and $successContinueGuardIndex -gt $successBoundaryIndex -and $successContinueIndex -gt $successContinueGuardIndex -and $cycleTwoReleaseIndex -gt $successContinueIndex) 'RUNTIME_PROBE_LOCK_TOKEN_LIFECYCLE_ORDERED'
- $settleCalls=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Wait-ThriveLensInterCycleMemorySettle'},$true));$boundaryCalls=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Invoke-ThriveLensInterCycleBoundary'},$true));$boundaryCycleGuarded=$false;if($boundaryCalls.Count -eq 1){$ancestor=$boundaryCalls[0].Parent;while($null -ne $ancestor){if($ancestor -is [Management.Automation.Language.IfStatementAst] -and $ancestor.Extent.Text -match 'if\s*\(\s*\$cycle\s*-eq\s*1\s*\)'){$boundaryCycleGuarded=$true;break};$ancestor=$ancestor.Parent}}
- $boundaryWaitIndex=$boundaryDefinition.IndexOf('Wait-ThriveLensInterCycleMemorySettle');$boundaryReleaseIndex=$boundaryDefinition.IndexOf('Exit-ThriveLensLifecycleLock',$boundaryWaitIndex);$boundaryClearLockIndex=$boundaryDefinition.IndexOf('$LifecycleLock.Value = $null',$boundaryReleaseIndex);$boundaryClearTokenIndex=$boundaryDefinition.IndexOf('$IdentityToken.Value = $null',$boundaryClearLockIndex)
- A ($settleCalls.Count -eq 1 -and $boundaryCalls.Count -eq 1 -and $boundaryCycleGuarded -and $boundaryWaitIndex -ge 0 -and $boundaryReleaseIndex -gt $boundaryWaitIndex -and $boundaryClearLockIndex -gt $boundaryReleaseIndex -and $boundaryClearTokenIndex -gt $boundaryClearLockIndex) 'RUNTIME_INTER_CYCLE_WAIT_RELEASE_CLEAR_EXACT_ORDER'
- $boundaryCallText=$boundaryCalls[0].Extent.Text
- A ($boundaryCallText -match '-MinimumFreeMemoryBytes\s+\(\[int64\]\$manifest\.resource_policy\.runtime_minimum_free_memory_bytes\)' -and $boundaryCallText -match '-LifecycleLock\s+\(\[ref\]\$probeLifecycleLock\)' -and $boundaryCallText -match '-IdentityToken\s+\(\[ref\]\$probeIdentityToken\)' -and $runtimeTest.Substring($successStartedFalseIndex,$successContinueIndex-$successStartedFalseIndex) -match 'credentialAbsenceVerified') 'RUNTIME_INTER_CYCLE_THRESHOLD_AND_REFS_EXACT'
- A ($boundaryDefinition -match '\$continueToNextCycle\s*=\s*\$false' -and $boundaryDefinition -match '\$continueToNextCycle\s*=\s*\$true' -and $boundaryDefinition -match 'finally\s*\{' -and $boundaryDefinition -notmatch '(?i)start\.ps1|Invoke-ThriveLensDistro|Stop-ThriveLens' -and $runtimeTest.Substring($successContinueGuardIndex,$successContinueIndex-$successContinueGuardIndex) -match 'throw\s+\[string\]\$interCycleBoundary\.OriginalCode') 'RUNTIME_INTER_CYCLE_CONTINUE_POLARITY_DEFAULT_DENY'
- A (Test-ThriveLensRuntimeInterCycleCallerContract -Source $runtimeTest) 'RUNTIME_INTER_CYCLE_CALLER_CONTRACT_CANONICAL'
- $callerOuterTry=@($runtimeAst.EndBlock.Statements|Where-Object{$_ -is [Management.Automation.Language.TryStatementAst]})[0]
- $callerCycleLoop=@($callerOuterTry.Body.FindAll({param($node)$node -is [Management.Automation.Language.ForEachStatementAst] -and $node.Variable.VariablePath.UserPath -ceq 'cycle' -and $node.Condition.Extent.Text -match '^\s*1\s*\.\.\s*2\s*$'},$true))[0]
- $callerCycleOneClause=@($callerCycleLoop.Body.FindAll({param($node)$node -is [Management.Automation.Language.IfStatementAst]},$true)|ForEach-Object{$ifNode=$_;@($ifNode.Clauses)|Where-Object{$_.Item1.Extent.Text -match '^\s*\$cycle\s*-eq\s*1\s*$'}})[0]
- $callerCycleOneStatements=@($callerCycleOneClause.Item2.Statements)
- $callerCredentialGuard=@($callerCycleOneStatements|Where-Object{$_ -is [Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -match '^\s*-not\s+\$credentialAbsenceVerified\s*$'})[0]
- $callerBoundaryAssignment=@($callerCycleOneStatements|Where-Object{$_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq '$interCycleBoundary'})[0]
- $callerCumulativeAssignment=@($callerCycleOneStatements|Where-Object{$_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq '$lockReleaseFailed'})[0]
- $callerFailureGuard=@($callerCycleOneStatements|Where-Object{$_ -is [Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -match '^\s*-not\s+\[bool\]\s*\$interCycleBoundary\.Continue\s*$'})[0]
- $callerFailureThrow=@($callerFailureGuard.Clauses[0].Item2.FindAll({param($node)$node -is [Management.Automation.Language.ThrowStatementAst]},$true))[0]
- $invertedCredentialGuard=Replace-ThriveLensTestSourceOnce -Source $runtimeTest -Old $callerCredentialGuard.Clauses[0].Item1.Extent.Text -New '$credentialAbsenceVerified'
- A (-not (Test-ThriveLensRuntimeInterCycleCallerContract -Source $invertedCredentialGuard)) 'RUNTIME_INTER_CYCLE_MUTATION_KILLS_INVERTED_CREDENTIAL_GUARD'
- $withoutCredentialGuard=Replace-ThriveLensTestSourceOnce -Source $runtimeTest -Old $callerCredentialGuard.Extent.Text -New ''
- $movedBoundaryIndex=$withoutCredentialGuard.IndexOf($callerBoundaryAssignment.Extent.Text,[StringComparison]::Ordinal)
- $guardMovedAfterBoundary=$withoutCredentialGuard.Insert($movedBoundaryIndex+$callerBoundaryAssignment.Extent.Text.Length,"`n"+$callerCredentialGuard.Extent.Text)
- A (-not (Test-ThriveLensRuntimeInterCycleCallerContract -Source $guardMovedAfterBoundary)) 'RUNTIME_INTER_CYCLE_MUTATION_KILLS_CREDENTIAL_GUARD_AFTER_BOUNDARY'
- $overwriteLockResult=Replace-ThriveLensTestSourceOnce -Source $runtimeTest -Old $callerCumulativeAssignment.Extent.Text -New '$lockReleaseFailed = [bool]$interCycleBoundary.LockReleaseFailed'
- A (-not (Test-ThriveLensRuntimeInterCycleCallerContract -Source $overwriteLockResult)) 'RUNTIME_INTER_CYCLE_MUTATION_KILLS_LOCK_OVERWRITE'
- $resetLockResult=Replace-ThriveLensTestSourceOnce -Source $runtimeTest -Old $callerCumulativeAssignment.Extent.Text -New '$lockReleaseFailed = $false'
- A (-not (Test-ThriveLensRuntimeInterCycleCallerContract -Source $resetLockResult)) 'RUNTIME_INTER_CYCLE_MUTATION_KILLS_LOCK_FALSE_ASSIGNMENT'
- $outerCatchBrace=$runtimeTest.IndexOf('{',$callerOuterTry.CatchClauses[0].Extent.StartOffset)
- $catchResetMutation=$runtimeTest.Insert($outerCatchBrace+1,"`n    `$lockReleaseFailed = `$false")
- A (-not (Test-ThriveLensRuntimeInterCycleCallerContract -Source $catchResetMutation)) 'RUNTIME_INTER_CYCLE_MUTATION_KILLS_OUTER_CATCH_RESET'
- $removedFailureThrow=Replace-ThriveLensTestSourceOnce -Source $runtimeTest -Old $callerFailureThrow.Extent.Text -New '$null = [string]$interCycleBoundary.OriginalCode'
- A (-not (Test-ThriveLensRuntimeInterCycleCallerContract -Source $removedFailureThrow)) 'RUNTIME_INTER_CYCLE_MUTATION_KILLS_REMOVED_FAILURE_THROW'
- $catchIndex=$runtimeTest.IndexOf("catch {",$runtimeTest.IndexOf("} | ConvertTo-Json -Compress"));$sameTokenCatchStop=$runtimeTest.IndexOf('Stop-ThriveLensPostgresUnderLock -IdentityToken $probeIdentityToken',$catchIndex);$sameTokenCatchTerminate=$runtimeTest.IndexOf('Stop-ThriveLensDistroAndVerify -IdentityToken $probeIdentityToken',$sameTokenCatchStop);$catchRelease=$runtimeTest.IndexOf('Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock',$sameTokenCatchTerminate);$preTokenObservation=$runtimeTest.IndexOf('Resolve-ThriveLensPreTokenStartObservation',$catchRelease);$freshStopInvocation=$runtimeTest.IndexOf("& pwsh -NoProfile -File (Join-Path `$PSScriptRoot 'stop.ps1')")
- A ($runtimeTest -match '\$probeIdentityEverEstablished=\$true' -and $sameTokenCatchStop -gt $catchIndex -and $sameTokenCatchTerminate -gt $sameTokenCatchStop -and $catchRelease -gt $sameTokenCatchTerminate -and $preTokenObservation -gt $catchRelease -and $freshStopInvocation -lt 0 -and $runtimeTest -notmatch 'Test-ThriveLensFailureAllowsFreshCleanup') 'RUNTIME_SAME_TOKEN_FAILURE_CLEANUP_DEFAULT_DENY'
- A ($runtimeTest -match 'Assert-ThriveLensDistroStopped' -and $runtimeTest -match 'Assert-ThriveLensHostPortAbsent' -and $runtimeTest -match 'Resolve-ThriveLensPreTokenStartObservation' -and $runtimeTest -notmatch '\$freshStopAllowed') 'RUNTIME_PRETOKEN_EXIT_READ_ONLY_OBSERVATION'
+ A (Test-ThriveLensRuntimeAdapterContract -Source $runtimeTest) 'RUNTIME_IN_PROCESS_TRANSACTION_CONTRACT'
+ $runtimeCoreCalls=Get-ThriveLensCommandAsts -Ast $runtimeAst -Name 'Invoke-ThriveLensPostgresStartUnderLock';$runtimeTokenCalls=Get-ThriveLensCommandAsts -Ast $runtimeAst -Name 'Get-ThriveLensWslCleanupIdentityToken';$settleCalls=Get-ThriveLensCommandAsts -Ast $runtimeAst -Name 'Wait-ThriveLensInterCycleMemorySettle'
+ A ($runtimeCoreCalls.Count -eq 1 -and $runtimeTokenCalls.Count -eq 1 -and $settleCalls.Count -eq 1) 'RUNTIME_ONE_CORE_AND_TOKEN_PER_LEXICAL_CYCLE'
+ A ($runtimeTest -notmatch '(?i)pwsh(?:\.exe)?\s+.*(?:preflight|start|stop)\.ps1|Start-Process|Resolve-ThriveLens(?:ChildOutcome|StartChildExit|PreTokenStartObservation)') 'RUNTIME_NO_CHILD_RUNNER_PRETOKEN_OR_FRESH_TOKEN_BRANCH'
  A ($runtimeTest -notmatch 'Invoke-ThriveLensDistro' -and $runtimeTest -match 'Invoke-ThriveLensGuardedDistro') 'RUNTIME_ONLY_GUARDED_DISTRO_CALLS'
+ A ($runtimeTest -match '\$completedCycles\s*-ne\s*2' -and $runtimeTest -match 'real_postgresql\s*=\s*\(\$completedCycles\s*-eq\s*2\)' -and $runtimeTest -match 'cycles\s*=\s*\$completedCycles') 'RUNTIME_COMMAND3_PASS_COMPLETED_CYCLE_DERIVED'
  A ($runtimeTest -match 'Resolve-ThriveLensRuntimeCleanupOutcome' -and $runtimeTest -match 'schema_version = 2' -and $runtimeTest -match 'original_code' -and $runtimeTest -match 'failure_stages' -and $runtimeTest -match 'credential_absence_verified') 'RUNTIME_CLOSED_FAILURE_SCHEMA_V2'
+
+ $coreMemoryGuard=@($startCoreAst.FindAll({param($node)$node -is [Management.Automation.Language.IfStatementAst] -and @($node.Clauses|Where-Object{$_.Item1.Extent.Text -match '^\s*\$freeMemoryBytes\s*-lt\s*\$runtimeMinimumBytes\s*$'}).Count -gt 0},$true))[0]
+ $coreGuardMutation=Replace-ThriveLensTestAstExtent -Source $module -Extent $coreMemoryGuard.Clauses[0].Item1.Extent -New '$freeMemoryBytes -ge $runtimeMinimumBytes'
+ A ((Test-ThriveLensSourceParses -Source $coreGuardMutation) -and -not (Test-ThriveLensStartCoreContract -Source $coreGuardMutation)) 'MUTATION_KILLS_CORE_RAM_GUARD_POLARITY'
+ $coreHardcodedMutation=Replace-ThriveLensTestSourceOnce -Source $module -Old '$leasedManifest.resource_policy.runtime_minimum_free_memory_bytes' -New '1073741824'
+ A ((Test-ThriveLensSourceParses -Source $coreHardcodedMutation) -and -not (Test-ThriveLensStartCoreContract -Source $coreHardcodedMutation)) 'MUTATION_KILLS_CORE_HARDCODED_THRESHOLD'
+ $corePolicyRereadMutation=Replace-ThriveLensTestSourceOnce -Source $module -Old 'Get-ThriveLensWslContract -ConfigurationLease $ConfigurationLease' -New 'Get-ThriveLensWslContract'
+ A ((Test-ThriveLensSourceParses -Source $corePolicyRereadMutation) -and -not (Test-ThriveLensStartCoreContract -Source $corePolicyRereadMutation)) 'MUTATION_KILLS_CORE_POLICY_REREAD'
+ $identityAssignment=@($startCoreAst.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Extent.Text -match '^\$null\s*=\s*Assert-ThriveLensWslIdentity'},$true))[0];$packageAssignment=@($startCoreAst.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Extent.Text -match '^\$null\s*=\s*Assert-ThriveLensWslPackages'},$true))[0]
+ $coreOrderMutation=$module.Substring(0,$identityAssignment.Extent.StartOffset)+$packageAssignment.Extent.Text+"`n        "+$identityAssignment.Extent.Text+$module.Substring($packageAssignment.Extent.EndOffset)
+ A ((Test-ThriveLensSourceParses -Source $coreOrderMutation) -and -not (Test-ThriveLensStartCoreContract -Source $coreOrderMutation)) 'MUTATION_KILLS_CORE_IDENTITY_PACKAGE_ORDER'
+ $attemptFlag=@($startCoreAst.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$StartAttempted.Value'},$true))[0]
+ $coreAdjacencyMutation=$module.Insert($attemptFlag.Extent.EndOffset,"`n        `$null=Assert-ThriveLensConfigurationLease -Lease `$ConfigurationLease")
+ A ((Test-ThriveLensSourceParses -Source $coreAdjacencyMutation) -and -not (Test-ThriveLensStartCoreContract -Source $coreAdjacencyMutation)) 'MUTATION_KILLS_CORE_ATTEMPTED_ADJACENCY'
+ $oldChildMutation=$module+"`nResolve-ThriveLensStartChildExit -ExitCode 2"
+ A ((Test-ThriveLensSourceParses -Source $oldChildMutation) -and -not (Test-ThriveLensStartCoreContract -Source $oldChildMutation)) 'MUTATION_KILLS_OLD_CHILD_SYMBOL'
+
+ A (Test-ThriveLensWslRunnerContract -Source $module) 'WSL_RUNNER_EXACT_FAILURE_CONTAINMENT_CONTRACT'
+ $wslRunnerMutations=@(
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_ROOT_KILL_REMOVAL';Old='if(-not $process.HasExited){$process.Kill($true)}';New='if($false){$process.Kill($true)}'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_ROOT_REAP_INVERSION';Old='if(-not $rootReaped){$cleanupProven=$false}';New='if($rootReaped){$cleanupProven=$false}'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_ROOT_HAS_EXITED_PROOF';Old='if($rootReaped){$rootReaped=$process.HasExited}';New='if($rootReaped){$rootReaped=$true}'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_STARTED_CLEANUP_GUARD';Old="`$cleanupProven=`$true`n        if(`$started){";New="`$cleanupProven=`$true`n        if(-not `$started){"},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_CLEANUP_INITIAL_TRUTH';Old='$cleanupProven=$true';New='$cleanupProven=$false'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_NULL_TASK_SKIP';Old='if($null -eq $ioTask){continue}';New='if($null -ne $ioTask){continue}'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_BOUNDED_TASK_WAIT';Old='$null=$ioTask.Wait(5000)';New='$null=$ioTask.Wait()'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_READER_COMPLETION_INVERSION';Old='if(-not $ioTask.IsCompleted){$cleanupProven=$false}';New='if($ioTask.IsCompleted){$cleanupProven=$false}'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_UNCERTAINTY_GATE_INVERSION';Old="if(-not `$cleanupProven){throw 'WSL_OUTPUT_DRAIN_INCOMPLETE'}";New="if(`$cleanupProven){throw 'WSL_OUTPUT_DRAIN_INCOMPLETE'}"},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_MONOTONIC_DEADLINE_REMOVAL';Old='$stopwatch=[Diagnostics.Stopwatch]::StartNew()';New='$stopwatch=[Diagnostics.Stopwatch]::new()'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_STDIN_WRITE_SHARED_DEADLINE';Old='($timeoutMilliseconds-$stopwatch.ElapsedMilliseconds)';New='$timeoutMilliseconds';Occurrence=1},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_STDIN_FLUSH_SHARED_DEADLINE';Old='($timeoutMilliseconds-$stopwatch.ElapsedMilliseconds)';New='$timeoutMilliseconds';Occurrence=2},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_STDIN_LIMIT_INVERSION';Old='if($stdinBytes.Length -gt 512)';New='if($stdinBytes.Length -le 512)'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_STDOUT_TASK_SLOT';Old='@($stdoutTask,$stderrTask,$stdinWriteTask,$stdinFlushTask)';New='@($null,$stderrTask,$stdinWriteTask,$stdinFlushTask)'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_STDERR_TASK_SLOT';Old='@($stdoutTask,$stderrTask,$stdinWriteTask,$stdinFlushTask)';New='@($stdoutTask,$null,$stdinWriteTask,$stdinFlushTask)'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_STDIN_WRITE_TASK_SLOT';Old='@($stdoutTask,$stderrTask,$stdinWriteTask,$stdinFlushTask)';New='@($stdoutTask,$stderrTask,$null,$stdinFlushTask)'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_STDIN_FLUSH_TASK_SLOT';Old='@($stdoutTask,$stderrTask,$stdinWriteTask,$stdinFlushTask)';New='@($stdoutTask,$stderrTask,$stdinWriteTask,$null)'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_ACTIVE_STDOUT_SINK_DISPOSAL';Old='if($stdoutComplete){$stdoutSink.Dispose()}';New='$stdoutSink.Dispose()'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_ACTIVE_STDERR_SINK_DISPOSAL';Old='if($stderrComplete){$stderrSink.Dispose()}';New='$stderrSink.Dispose()'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_PROCESS_COMPLETION_GATE';Old='if($rootInactive -and $stdoutComplete -and $stderrComplete -and $stdinWriteComplete -and $stdinFlushComplete){$process.Dispose()}';New='if($rootInactive){$process.Dispose()}'},
+  [pscustomobject]@{Code='MUTATION_KILLS_WSL_RUNNER_PROCESS_INACTIVE_GATE';Old='if($rootInactive -and $stdoutComplete -and $stderrComplete -and $stdinWriteComplete -and $stdinFlushComplete){$process.Dispose()}';New='if($stdoutComplete -and $stderrComplete -and $stdinWriteComplete -and $stdinFlushComplete){$process.Dispose()}'}
+ )
+ foreach($wslRunnerMutation in $wslRunnerMutations){
+  $occurrence=if($null -ne $wslRunnerMutation.PSObject.Properties['Occurrence']){[int]$wslRunnerMutation.Occurrence}else{1}
+  $mutant=if($occurrence -eq 1 -and $module.IndexOf($wslRunnerMutation.Old,[StringComparison]::Ordinal) -ge 0 -and $module.IndexOf($wslRunnerMutation.Old,$module.IndexOf($wslRunnerMutation.Old,[StringComparison]::Ordinal)+$wslRunnerMutation.Old.Length,[StringComparison]::Ordinal) -lt 0){Replace-ThriveLensTestSourceOnce -Source $module -Old $wslRunnerMutation.Old -New $wslRunnerMutation.New}else{Replace-ThriveLensTestSourceOccurrence -Source $module -Old $wslRunnerMutation.Old -New $wslRunnerMutation.New -Occurrence $occurrence}
+  A ($mutant -cne $module -and (Test-ThriveLensSourceParses -Source $mutant) -and -not (Test-ThriveLensWslRunnerContract -Source $mutant)) $wslRunnerMutation.Code
+ }
+ $typeVersionMutant=Replace-ThriveLensTestSourceOnce -Source $module -Old "public sealed class OutputBudget { public const int ContractVersion=2;" -New "public sealed class OutputBudget { public const int ContractVersion=1;"
+ A ($typeVersionMutant -cne $module -and (Test-ThriveLensSourceParses -Source $typeVersionMutant) -and -not (Test-ThriveLensWslSecurityTypeContract -Source $typeVersionMutant)) 'MUTATION_KILLS_WSL_SECURITY_V2_VERSION_DOWNGRADE'
+ $typeOverflowMutant=Replace-ThriveLensTestSourceOnce -Source $module -Old 'if(total>budget.Limit){budget.Exceeded=true;throw new IOException("OUTPUT_LIMIT");}data.Write(buffer,offset,count);' -New 'if(total>budget.Limit){budget.Exceeded=true;}data.Write(buffer,offset,count);'
+ A ($typeOverflowMutant -cne $module -and (Test-ThriveLensSourceParses -Source $typeOverflowMutant) -and -not (Test-ThriveLensWslSecurityTypeContract -Source $typeOverflowMutant)) 'MUTATION_KILLS_WSL_SECURITY_V2_OVERFLOW_NO_APPEND'
+
+ $startGuestGuard=@($startAst.FindAll({param($node)$node -is [Management.Automation.Language.IfStatementAst] -and @($node.Clauses|Where-Object{$_.Item1.Extent.Text -match '\$sameTokenAuthority\s*-and\s*\$cleanupLeaseValid\s*-and\s*\$guestCleanupAllowed\s*-and\s*\$attempted'}).Count -gt 0},$true))[0]
+ $startGuardMutation=Replace-ThriveLensTestAstExtent -Source $startRaw -Extent $startGuestGuard.Clauses[0].Item1.Extent -New '-not $sameTokenAuthority -and $cleanupLeaseValid -and $guestCleanupAllowed -and $attempted'
+ A ((Test-ThriveLensSourceParses -Source $startGuardMutation) -and -not (Test-ThriveLensStartAdapterContract -Source $startGuardMutation)) 'MUTATION_KILLS_START_CLEANUP_GUARD_POLARITY'
+ $startAbsenceAssignment=@($startAst.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$absenceObservationAuthorized'},$true))[0]
+ $startNoContractGuard=Replace-ThriveLensTestAstExtent -Source $startRaw -Extent $startAbsenceAssignment.Right.Extent -New '$null -ne $leasedPaths -and ($forcedTerminationAuthorized -or -not $cleanupRequired)'
+ A ((Test-ThriveLensSourceParses -Source $startNoContractGuard) -and -not (Test-ThriveLensStartAdapterContract -Source $startNoContractGuard)) 'MUTATION_KILLS_START_ABSENCE_CONTRACT_GUARD_REMOVAL'
+ $startNoPathsGuard=Replace-ThriveLensTestAstExtent -Source $startRaw -Extent $startAbsenceAssignment.Right.Extent -New '$null -ne $leasedContract -and ($forcedTerminationAuthorized -or -not $cleanupRequired)'
+ A ((Test-ThriveLensSourceParses -Source $startNoPathsGuard) -and -not (Test-ThriveLensStartAdapterContract -Source $startNoPathsGuard)) 'MUTATION_KILLS_START_ABSENCE_PATHS_GUARD_REMOVAL'
+ $startNoConfigurationGuards=Replace-ThriveLensTestAstExtent -Source $startRaw -Extent $startAbsenceAssignment.Right.Extent -New '($forcedTerminationAuthorized -or -not $cleanupRequired)'
+ $startNoConfigurationGuardsResult=Invoke-ThriveLensStartAdapterHarness -Source $startNoConfigurationGuards -Mode 'PRE_LEASE_FAIL'
+ A ((Test-ThriveLensSourceParses -Source $startNoConfigurationGuards) -and -not (Test-ThriveLensStartAdapterContract -Source $startNoConfigurationGuards) -and
+    @($startNoConfigurationGuardsResult.Log) -contains 'DISTRO_ABSENT' -and @($startNoConfigurationGuardsResult.Log) -contains 'HOST_ABSENT') 'MUTATION_KILLS_START_ABSENCE_CONFIGURATION_GUARDS_REMOVAL'
+ $startAssignments=@($startAst.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -cin @('$lifecycleLock','$configurationLease') -and $node.Right.Extent.Text -match '^\s*Enter-ThriveLens(?:LifecycleLock|ConfigurationLease)\s*$'},$true)|Sort-Object {$_.Extent.StartOffset})
+ $startOrderExtent=[pscustomobject]@{StartOffset=$startAssignments[0].Extent.StartOffset;EndOffset=$startAssignments[1].Extent.EndOffset}
+ $startOrderMutation=$startRaw.Substring(0,$startOrderExtent.StartOffset)+$startAssignments[1].Extent.Text+"`n    "+$startAssignments[0].Extent.Text+$startRaw.Substring($startOrderExtent.EndOffset)
+ A ((Test-ThriveLensSourceParses -Source $startOrderMutation) -and -not (Test-ThriveLensStartAdapterContract -Source $startOrderMutation)) 'MUTATION_KILLS_START_LOCK_LEASE_ORDER'
+ $startForceCalls=Get-ThriveLensCommandAsts -Ast $startAst -Name 'Stop-ThriveLensDistroAndVerify';$startSkippedForce=Replace-ThriveLensTestAstExtent -Source $startRaw -Extent $startForceCalls[0].Extent -New 'Write-Output $null'
+ A ((Test-ThriveLensSourceParses -Source $startSkippedForce) -and -not (Test-ThriveLensStartAdapterContract -Source $startSkippedForce)) 'MUTATION_KILLS_START_SKIPPED_FORCED_TERMINATION'
+ $startReleaseAssignments=@($startAst.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$lockReleaseFailed' -and $node.Right.Extent.Text -ceq '$true'},$true)|Sort-Object {$_.Extent.StartOffset});$startReleaseReset=Replace-ThriveLensTestAstExtent -Source $startRaw -Extent $startReleaseAssignments[0].Extent -New '$lockReleaseFailed = $false'
+ $startReleaseResetResult=Invoke-ThriveLensStartAdapterHarness -Source $startReleaseReset -Mode 'LOCK_RELEASE_FAIL'
+ A ((Test-ThriveLensSourceParses -Source $startReleaseReset) -and -not (Test-ThriveLensStartAdapterContract -Source $startReleaseReset) -and
+    @($startReleaseResetResult.Log|Where-Object{$_ -ceq 'LOCK_RELEASE'}).Count -eq 1 -and
+     $startReleaseResetResult.Adapter.Response.code -ceq 'POST_MUTATION_RESOURCE_GATE_FAILED' -and
+    $startReleaseResetResult.Adapter.Response.lifecycle_lock_release_attempted -and -not $startReleaseResetResult.Adapter.Response.lifecycle_lock_released) 'MUTATION_KILLS_START_RELEASE_FLAG_RESET'
+
+ $runtimeCycleGuard=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.IfStatementAst] -and @($node.Clauses|Where-Object{$_.Item1.Extent.Text -match '^\s*-not\s+\$cycleComplete\s*$'}).Count -gt 0},$true))[0]
+ $runtimeGuardMutation=Replace-ThriveLensTestAstExtent -Source $runtimeTest -Extent $runtimeCycleGuard.Clauses[0].Item1.Extent -New '$cycleComplete'
+ A ((Test-ThriveLensSourceParses -Source $runtimeGuardMutation) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $runtimeGuardMutation)) 'MUTATION_KILLS_RUNTIME_COMPLETED_CYCLE_GUARD_POLARITY'
+ $runtimeHardcodedMutation=Replace-ThriveLensTestSourceOnce -Source $runtimeTest -Old '$minimumFreeMemoryBytes = [int64]$manifest.resource_policy.runtime_minimum_free_memory_bytes' -New '$minimumFreeMemoryBytes = [int64]1073741824'
+ A ((Test-ThriveLensSourceParses -Source $runtimeHardcodedMutation) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $runtimeHardcodedMutation)) 'MUTATION_KILLS_RUNTIME_HARDCODED_SETTLE_THRESHOLD'
+ $runtimePolicyRereadMutation=Replace-ThriveLensTestSourceOnce -Source $runtimeTest -Old 'Get-ThriveLensWslContract -ConfigurationLease $configurationLease' -New 'Get-ThriveLensWslContract'
+ A ((Test-ThriveLensSourceParses -Source $runtimePolicyRereadMutation) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $runtimePolicyRereadMutation)) 'MUTATION_KILLS_RUNTIME_POLICY_REREAD'
+ $runtimeCycle=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.ForEachStatementAst] -and $node.Variable.VariablePath.UserPath -ceq 'cycle'},$true))[0]
+ $runtimeSuccessForce=@((Get-ThriveLensCommandAsts -Ast $runtimeAst -Name 'Stop-ThriveLensDistroAndVerify')|Where-Object{$_.Extent.StartOffset -gt $runtimeCycle.Extent.StartOffset -and $_.Extent.EndOffset -lt $runtimeCycle.Extent.EndOffset})[0]
+ $runtimeSkippedForce=Replace-ThriveLensTestAstExtent -Source $runtimeTest -Extent $runtimeSuccessForce.Extent -New 'Write-Output $null'
+ A ((Test-ThriveLensSourceParses -Source $runtimeSkippedForce) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $runtimeSkippedForce)) 'MUTATION_KILLS_RUNTIME_SKIPPED_FORCED_TERMINATION'
+ $runtimeCatch=@($runtimeAst.EndBlock.Statements|Where-Object{$_ -is [Management.Automation.Language.TryStatementAst]})[0].CatchClauses[0]
+ $runtimeResetMutation=$runtimeTest.Insert($runtimeCatch.Body.Extent.StartOffset+1,"`n    `$lockReleaseFailed = `$false")
+ A ((Test-ThriveLensSourceParses -Source $runtimeResetMutation) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $runtimeResetMutation)) 'MUTATION_KILLS_RUNTIME_CATCH_RELEASE_RESET'
+ $runtimeIdentityMismatchMutation=Replace-ThriveLensTestSourceOnce -Source $runtimeTest -Old 'elseif ($cycleClusterIdentityFingerprint -cne $clusterIdentityFingerprint)' -New 'elseif ($cycleClusterIdentityFingerprint -ceq $clusterIdentityFingerprint)'
+ A ($runtimeIdentityMismatchMutation -cne $runtimeTest -and (Test-ThriveLensSourceParses -Source $runtimeIdentityMismatchMutation) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $runtimeIdentityMismatchMutation)) 'MUTATION_KILLS_RUNTIME_CLUSTER_IDENTITY_MISMATCH_POLARITY'
  $preflightRaw=Get-Content (Join-Path $PSScriptRoot 'preflight.ps1') -Raw;A ($preflightRaw -match 'function Stop-ThriveLensPreflightDistro' -and $preflightRaw -match 'Stop-ThriveLensDistroAndVerify' -and $preflightRaw -match 'Assert-ThriveLensHostPortAbsent') 'PREFLIGHT_EXACT_DISTRO_CLEANUP'
  A ($preflightRaw -match '\$preflightLock=Enter-ThriveLensLifecycleLock' -and $preflightRaw -match 'Assert-ThriveLensWslAbsent' -and $preflightRaw -match 'finally\{if\(\$null -ne \$preflightLock\)') 'PREFLIGHT_LOCKED_ABSENCE_BEFORE_TERMINATE'
  $guardStart=$module.IndexOf('function Invoke-ThriveLensGuardedDistro');$guardEnd=$module.IndexOf('function Assert-ThriveLensLifecycleLockOwnership',$guardStart);$guardBody=if($guardStart -ge 0 -and $guardEnd -gt $guardStart){$module.Substring($guardStart,$guardEnd-$guardStart)}else{''}

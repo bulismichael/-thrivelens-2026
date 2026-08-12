@@ -15,6 +15,37 @@ function Assert-Condition {
     if (-not $Condition) { $failures.Add($Code) }
 }
 
+function Test-ThriveLensRuntimeResourceRunnerDisposalContract {
+    param([Parameter(Mandatory)][string]$Source)
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($Source, [ref]$tokens, [ref]$errors)
+    if (@($errors).Count -ne 0) { return $false }
+    $functions = @($ast.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-ThriveLensResourceGate'
+    }, $true))
+    if ($functions.Count -ne 1) { return $false }
+    $body = $functions[0].Extent.Text
+    return (
+        $body -match 'if\s*\(\$stdoutReaderComplete\)\s*\{\s*\$stdoutSink\.Dispose\(\)\s*\}' -and
+        $body -match 'if\s*\(\$stderrReaderComplete\)\s*\{\s*\$stderrSink\.Dispose\(\)\s*\}' -and
+        $body -match '\$rootInactive\s*=\s*-not\s+\$started' -and
+        $body -match 'if\s*\(\$started\)\s*\{[\s\S]+?\$rootInactive\s*=\s*\$process\.HasExited' -and
+        $body -match 'if\s*\(\$rootInactive\s*-and\s*\$stdoutReaderComplete\s*-and\s*\$stderrReaderComplete\)\s*\{\s*\$process\.Dispose\(\)\s*\}'
+    )
+}
+
+function Replace-ThriveLensStaticSourceOnce {
+    param([string]$Source, [string]$Old, [string]$New)
+    $offset = $Source.IndexOf($Old, [StringComparison]::Ordinal)
+    if ($offset -lt 0 -or $Source.IndexOf($Old, $offset + $Old.Length, [StringComparison]::Ordinal) -ge 0) {
+        throw 'STATIC_MUTATION_TARGET_NOT_UNIQUE'
+    }
+    return $Source.Substring(0, $offset) + $New + $Source.Substring($offset + $Old.Length)
+}
+
 function Invoke-ComposeValidatorProbe {
     param(
         [Parameter(Mandatory)][hashtable]$EnvironmentValues,
@@ -75,8 +106,71 @@ try {
     $composeValidator = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'validate_compose_inputs.ps1') -Raw
     $postgresInstaller = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts\bootstrap\backend\install_postgres.ps1') -Raw
     $pythonInstaller = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts\bootstrap\backend\install_python.ps1') -Raw
-    Assert-Condition ($start -match "-h 127\.0\.0\.1") 'START_LOOPBACK'
-    Assert-Condition ($start -match "'-w'.*'-t'.*'30'") 'START_BOUNDED_WAIT'
+    $startTokens = $null
+    $startParseErrors = $null
+    $startAst = [Management.Automation.Language.Parser]::ParseInput(
+        $start,
+        [ref]$startTokens,
+        [ref]$startParseErrors
+    )
+    $runtimeTokens = $null
+    $runtimeParseErrors = $null
+    $runtimeAst = [Management.Automation.Language.Parser]::ParseInput(
+        $runtimeTest,
+        [ref]$runtimeTokens,
+        [ref]$runtimeParseErrors
+    )
+    $wslTokens = $null
+    $wslParseErrors = $null
+    $wslAst = [Management.Automation.Language.Parser]::ParseInput(
+        $wslModule,
+        [ref]$wslTokens,
+        [ref]$wslParseErrors
+    )
+    $runtimeModuleTokens = $null
+    $runtimeModuleParseErrors = $null
+    $runtimeModuleAst = [Management.Automation.Language.Parser]::ParseInput(
+        $runtimeModule,
+        [ref]$runtimeModuleTokens,
+        [ref]$runtimeModuleParseErrors
+    )
+    $startCoreCalls = @($startAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Invoke-ThriveLensPostgresStartUnderLock'
+    }, $true))
+    $runtimeCoreCalls = @($runtimeAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Invoke-ThriveLensPostgresStartUnderLock'
+    }, $true))
+    $coreFunctions = @($wslAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-ThriveLensPostgresStartUnderLock'
+    }, $true))
+    $coreBody = if ($coreFunctions.Count -eq 1) { $coreFunctions[0].Extent.Text } else { '' }
+    $resourceGateFunctions = @($runtimeModuleAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-ThriveLensResourceGate'
+    }, $true))
+    $resourceGateBody = if ($resourceGateFunctions.Count -eq 1) { $resourceGateFunctions[0].Extent.Text } else { '' }
+    $resourceResultFunctions = @($runtimeModuleAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Read-ThriveLensResourceGateResult'
+    }, $true))
+    $resourceResultBody = if ($resourceResultFunctions.Count -eq 1) { $resourceResultFunctions[0].Extent.Text } else { '' }
+
+    Assert-Condition (@($startParseErrors).Count -eq 0 -and $startCoreCalls.Count -eq 1) 'START_ONE_IN_PROCESS_CORE_CALL'
+    Assert-Condition (@($runtimeParseErrors).Count -eq 0 -and $runtimeCoreCalls.Count -eq 1) 'TEST_ONE_LEXICAL_CORE_CALL'
+    Assert-Condition (@($wslParseErrors).Count -eq 0 -and $coreFunctions.Count -eq 1) 'SHARED_START_CORE_PRESENT'
+    Assert-Condition ($coreBody -match "-h 127\.0\.0\.1" -and $coreBody -match "'-w'.*'-t'.*'30'") 'CORE_LOOPBACK_BOUNDED_WAIT'
+    $oldChildSymbols = 'Resolve-ThriveLens(?:ChildOutcome|StartChildExit|PreTokenStartObservation|StartChildFailure|StartChildFailureOutcome|RuntimeFailureOutcome)'
+    Assert-Condition ($start -notmatch '(?i)pwsh(?:\.exe)?\s+.*(?:preflight|start)\.ps1|Start-Process' -and $start -notmatch $oldChildSymbols) 'START_NO_NESTED_RUNNER_OR_CHILD_POLICY'
+    Assert-Condition ($runtimeTest -notmatch '(?i)pwsh(?:\.exe)?\s+.*(?:preflight|start|stop)\.ps1|Start-Process' -and $runtimeTest -notmatch $oldChildSymbols) 'TEST_NO_NESTED_RUNNER_OR_CHILD_POLICY'
+    Assert-Condition ($wslModule -notmatch $oldChildSymbols -and $runtimeModule -notmatch $oldChildSymbols) 'NO_OLD_CHILD_POLICY_SYMBOLS'
     Assert-Condition ($start -match 'POSTGRES_START_CLEANUP_FAILED') 'START_FAILURE_CLEANUP'
     Assert-Condition ($start -match 'POSTGRES_START_CLEANUP_FAILED') 'START_CLEANUP_FAILURE_CODE'
     Assert-Condition ($wslModule -match "'-m'.*'fast'.*'-w'.*'-t'.*'30'") 'STOP_BOUNDED_FAST'
@@ -97,11 +191,19 @@ try {
     Assert-Condition ($preflight -match 'PYTHON_INSTALL_DISABLED_UNMEASURED_SCRATCH_CACHE') 'PYTHON_INSTALL_BLOCKER'
     Assert-Condition ($preflight -match 'PYTHON_INSTALL_DISABLED_UNMEASURED_SCRATCH_CACHE') 'PYTHON_PROJECTION_BLOCKER'
     Assert-Condition ($wslModule -match 'WSL_POSTGRES_VERSION_MISMATCH') 'RUNTIME_EXACT_VERSIONS'
-    Assert-Condition ($runtimeTest -match 'Stop-ThriveLensPostgresUnderLock[\s\S]+Stop-ThriveLensDistroAndVerify[\s\S]+Assert-ThriveLensDistroStopped[\s\S]+Assert-ThriveLensHostPortAbsent[\s\S]+status=''PASS''') 'TEST_SAME_TOKEN_STOP_BEFORE_PASS'
-    Assert-Condition ($runtimeTest.IndexOf('$started=$true') -lt $runtimeTest.IndexOf("start.ps1")) 'TEST_MARKS_START_BEFORE_CHILD'
-    $runtimeStopChildInvocation = "& pwsh -NoProfile -File (Join-Path `$PSScriptRoot 'stop.ps1')"
-    Assert-Condition ($runtimeTest -match 'Resolve-ThriveLensPreTokenStartObservation' -and $runtimeTest.IndexOf($runtimeStopChildInvocation,[StringComparison]::Ordinal) -lt 0) 'TEST_PRETOKEN_START_READ_ONLY_OBSERVATION'
-    Assert-Condition ($runtimeTest -match 'RUNTIME_START_PROBE_FAILED') 'TEST_CHILD_FAILURE_CLASSIFIER'
+    Assert-Condition ($runtimeTest -match 'Stop-ThriveLensPostgresUnderLock[\s\S]+Stop-ThriveLensDistroAndVerify[\s\S]+Assert-ThriveLensDistroStopped[\s\S]+Assert-ThriveLensHostPortAbsent[\s\S]+\$completedCycles\+\+[\s\S]+status\s*=\s*''PASS''') 'TEST_SAME_TOKEN_STOP_BEFORE_COMPLETED_PASS'
+    Assert-Condition ($runtimeTest -match '\$completedCycles\s*-ne\s*2' -and $runtimeTest -match 'real_postgresql\s*=\s*\(\$completedCycles\s*-eq\s*2\)' -and $runtimeTest -match 'cycles\s*=\s*\$completedCycles') 'TEST_PASS_DERIVED_FROM_COMPLETED_CYCLES'
+    Assert-Condition ($runtimeTest -match '\$leasedContract\s*=\s*Get-ThriveLensWslContract\s+-ConfigurationLease\s+\$configurationLease' -and
+        $runtimeTest -match '\$leasedPaths\s*=\s*Get-ThriveLensWslPaths\s+-Contract\s+\$leasedContract' -and
+        $runtimeTest -match '\$manifest\s*=\s*\$leasedContract\.Manifest' -and
+        $runtimeTest -notmatch 'Get-ThriveLensManifest') 'TEST_USES_LEASED_POLICY_ONLY'
+    Assert-Condition ($start -match 'Get-ThriveLensWslContract\s+-ConfigurationLease\s+\$configurationLease' -and
+        $start -match 'Get-ThriveLensWslPaths\s+-Contract\s+\$leasedContract' -and
+        $start -match 'Get-ThriveLensWslCleanupIdentityToken[\s\S]+-Contract\s+\$leasedContract') 'START_FREEZES_LEASED_CONTRACT_AND_PATHS'
+    Assert-Condition ($start -match '\$absenceObservationAuthorized\s*=\s*\$null\s*-ne\s*\$leasedContract\s*-and\s*\$null\s*-ne\s*\$leasedPaths\s*-and\s*\(\$forcedTerminationAuthorized\s*-or\s*-not\s*\$cleanupRequired\)' -and
+        $start -match 'if\s*\(\$absenceObservationAuthorized\)\s*\{[\s\S]+Assert-ThriveLensDistroStopped[\s\S]+Assert-ThriveLensHostPortAbsent') 'START_ABSENCE_REQUIRES_FROZEN_CONFIGURATION'
+    Assert-Condition ($runtimeTest -match 'Stop-ThriveLensPostgresUnderLock\s+-IdentityToken\s+\$probeIdentityToken\s+-LifecycleLock\s+\$probeLifecycleLock\s+-Contract\s+\$leasedContract\s+-Paths\s+\$leasedPaths' -and
+        $start -match 'Stop-ThriveLensPostgresUnderLock[\s\S]+-Contract\s+\$leasedContract[\s\S]+-Paths\s+\$leasedPaths') 'ADAPTER_STOP_USES_FROZEN_CONFIGURATION'
     Assert-Condition ($runtimeTest -match 'Resolve-ThriveLensRuntimeCleanupOutcome' -and $wslModule -match 'RUNTIME_CLEANUP_FAILED') 'TEST_CLEANUP_OUTCOME_CLASSIFIER'
     Assert-Condition ($start -match 'POSTGRES_START_CLEANUP_FAILED') 'TEST_PRESERVES_START_FATAL'
     Assert-Condition ($securityTest.IndexOf('finally {') -lt $securityTest.LastIndexOf('$preliminaryResponse | ConvertTo-Json')) 'SECURITY_PASS_AFTER_CLEANUP'
@@ -111,11 +213,63 @@ try {
     Assert-Condition ($runtimeModule -match 'Assert-ThriveLensProjectedBudget') 'PROJECTED_BUDGET_PRIMITIVE'
     Assert-Condition ($runtimeModule -match 'Assert-ThriveLensFreeDiskBudget') 'PROJECTED_DISK_PRIMITIVE'
     Assert-Condition ($runtimeModule -match 'SECRET_ACL_ALLOWLIST_VIOLATION') 'SECRET_FULL_ALLOWLIST'
-    Assert-Condition ($runtimeModule -match 'Resolve-ThriveLensStartChildFailure') 'RUNTIME_CHILD_POLICY_PRIMITIVE'
-    Assert-Condition ($runtimeModule -match 'Resolve-ThriveLensRuntimeFailureOutcome') 'RUNTIME_CLEANUP_POLICY_PRIMITIVE'
+    Assert-Condition ($runtimeModule -match 'Enter-ThriveLensConfigurationLease' -and $runtimeModule -match 'Assert-ThriveLensConfigurationLease' -and $runtimeModule -match 'Exit-ThriveLensConfigurationLease') 'RUNTIME_CONFIGURATION_LEASE_PRIMITIVES'
+    Assert-Condition ($runtimeModule -match '\[IO\.FileShare\]::Read' -and $runtimeModule -notmatch '\[IO\.FileShare\]::ReadWrite') 'RUNTIME_CONFIGURATION_LEASE_READ_SHARE_ONLY'
+    Assert-Condition ($runtimeModule -match 'CONFIGURATION_LEASE_JSON_DUPLICATE_PROPERTY' -and $runtimeModule -match 'CONFIGURATION_LEASE_BOM_REJECTED') 'RUNTIME_CONFIGURATION_STRICT_JSON'
+    Assert-Condition ($wslModule -match 'Resolve-ThriveLensRuntimeCleanupOutcome') 'RUNTIME_CLEANUP_POLICY_PRIMITIVE'
     Assert-Condition ($runtimeModule -match 'Assert-ThriveLensComposeDataDirectory') 'COMPOSE_EXACT_DIRECTORY_PRIMITIVE'
     Assert-Condition ($runtimeModule -match 'Assert-ThriveLensPathOutsideDirectory') 'COMPOSE_DISJOINT_PATH_PRIMITIVE'
     Assert-Condition ($runtimeModule -match "ValidateSet\('postgres', 'pg_ctl', 'initdb', 'pg_isready'\)") 'FOUR_EXACT_VERSION_TOOLS'
+    Assert-Condition (@($runtimeModuleParseErrors).Count -eq 0 -and $resourceGateFunctions.Count -eq 1 -and
+        $resourceGateBody -match "\`$pwshPath\s*=\s*\[IO\.Path\]::GetFullPath\(\[IO\.Path\]::Combine\(\`$PSHOME,\s*'pwsh\.exe'\)\)" -and
+        $resourceGateBody -match '\$startInfo\.FileName\s*=\s*\$pwshPath' -and
+        $resourceGateBody -match '\$startInfo\.UseShellExecute\s*=\s*\$false' -and
+        $resourceGateBody -match '\$startInfo\.CreateNoWindow\s*=\s*\$true' -and
+        $resourceGateBody -notmatch '(?i)cmd(?:\.exe)?|UseShellExecute\s*=\s*\$true') 'RESOURCE_GATE_ABSOLUTE_NO_SHELL_RUNNER'
+    Assert-Condition ($resourceGateBody -match "ArgumentList\.Add\('-NoProfile'\)[\s\S]+ArgumentList\.Add\('-NonInteractive'\)[\s\S]+ArgumentList\.Add\('-File'\)[\s\S]+ArgumentList\.Add\(\`$scriptPath\)" -and
+        $resourceGateBody -notmatch "ArgumentList\.Add\('-Command'\)") 'RESOURCE_GATE_EXACT_ARGUMENT_VECTOR'
+    Assert-Condition ($runtimeModule -match 'ResourceGateOutputBudgetV2[\s\S]+ContractVersion\s*=\s*"TL_RESOURCE_GATE_CAPTURE_V2"' -and
+        $runtimeModule -match 'ResourceGateCaptureStreamV2[\s\S]+ContractVersion\s*=\s*"TL_RESOURCE_GATE_CAPTURE_V2"' -and
+        $runtimeModule -match '\$resourceGateCaptureProbeBudget\s*=\s*\[ThriveLens\.ResourceGateOutputBudgetV2\]::new\(4\)' -and
+        $runtimeModule -match '\$probeBytes\.Length\s*-ne\s*3' -and
+        $resourceGateBody -match 'ResourceGateOutputBudgetV2\]::new\(131072\)' -and
+        $resourceGateBody -match 'ResourceGateCaptureStreamV2\]::new\(\$budget\)[\s\S]+ResourceGateCaptureStreamV2\]::new\(\$budget\)' -and
+        $resourceGateBody -match 'ElapsedMilliseconds\s*-ge\s*30000' -and
+        $resourceGateBody -match '30000\s*-\s*\[int\]\$watch\.ElapsedMilliseconds' -and
+        $resourceGateBody -match '\[Threading\.Thread\]::Sleep\(10\)') 'RESOURCE_GATE_V2_ATTESTED_SHARED_CAP_AND_DEADLINE'
+    Assert-Condition ($resourceGateBody -match '\$process\.Kill\(\$true\)' -and
+        $resourceGateBody -match '\$process\.WaitForExit\(5000\)' -and
+        $resourceGateBody -match 'Task\]::WaitAll\(\$tasks,\s*5000\)' -and
+        $resourceGateBody -match 'Where-Object\s*\{\s*-not\s+\$_\.IsCompleted\s*\}' -and
+        $resourceGateBody -match "RESOURCE_GATE_FAILED','RESOURCE_GATE_PROCESS_START_FAILED'[\s\S]+RESOURCE_GATE_TIMEOUT','RESOURCE_GATE_OUTPUT_LIMIT'[\s\S]+RESOURCE_GATE_OUTPUT_DRAIN_INCOMPLETE','RESOURCE_GATE_RESULT_INVALID") 'RESOURCE_GATE_KILL_REAP_JOIN_FINITE_CODES'
+    Assert-Condition ($resourceResultFunctions.Count -eq 1 -and
+        $resourceResultBody -match "'cap_gb','accounted_bytes','accounted_gb','remaining_gb','used_percent'[\s\S]+'warning_percent','hard_stop_percent','file_count','roots'[\s\S]+'missing_inactive_roots','nested_roots_already_covered','status','phase'[\s\S]+'host_free_memory_gb'" -and
+        $resourceResultBody -match '\$properties\.Count\s*-ne\s*\$expectedNames\.Count' -and
+        $resourceResultBody -match '\[string\]\$properties\[11\]\.Value\.GetString\(\)\s*-cnotin\s*@\(''OK'',\s*''WARNING''\)' -and
+        $resourceResultBody -match '\$properties\[1\]\.Value\.TryGetInt64\(\[ref\]\$accountedBytes\)' -and
+        $resourceResultBody -match 'JsonDocumentOptions[\s\S]+AllowTrailingCommas\s*=\s*\$false[\s\S]+JsonCommentHandling\]::Disallow' -and
+        $resourceResultBody -match 'Assert-ThriveLensConfigurationJsonElement') 'RESOURCE_GATE_SYSTEM_TEXT_JSON_EXACT_RESULT_SCHEMA'
+    Assert-Condition ($resourceGateBody -match 'if\s*\(\$stderrBytes\.Length\s*-ne\s*0\)\s*\{\s*throw\s+''RESOURCE_GATE_RESULT_INVALID''\s*\}' -and
+        $resourceGateBody -notmatch '(?i)GetString\(\$stderrBytes\)|Write-(?:Output|Host|Error|Warning|Information)[^\r\n]*\$stderr') 'RESOURCE_GATE_STDERR_PRIVATE_BYTES_AND_REJECTED'
+    Assert-Condition ($runtimeModule -match 'function ConvertTo-ThriveLensResourcePolicyInt64[\s\S]+\$Value\s+-is\s+\[enum\][\s\S]+\$Value\s+-is\s+\[bool\][\s\S]+\$Value\s+-isnot\s+\[sbyte\][\s\S]+\$Value\s+-isnot\s+\[uint64\][\s\S]+\[uint64\]\[int64\]::MaxValue') 'RESOURCE_GATE_MANIFEST_EXACT_INTEGRAL_PRIMITIVES'
+    Assert-Condition (Test-ThriveLensRuntimeResourceRunnerDisposalContract -Source $runtimeModule) 'RESOURCE_GATE_CONDITIONAL_READER_AND_PROCESS_DISPOSAL'
+    $runtimeDisposalMutations = @(
+        [pscustomobject]@{ Code = 'MUTATION_KILLS_RESOURCE_GATE_ACTIVE_STDOUT_SINK_DISPOSAL'; Old = 'if ($stdoutReaderComplete) { $stdoutSink.Dispose() }'; New = '$stdoutSink.Dispose()' },
+        [pscustomobject]@{ Code = 'MUTATION_KILLS_RESOURCE_GATE_ACTIVE_STDERR_SINK_DISPOSAL'; Old = 'if ($stderrReaderComplete) { $stderrSink.Dispose() }'; New = '$stderrSink.Dispose()' },
+        [pscustomobject]@{ Code = 'MUTATION_KILLS_RESOURCE_GATE_PROCESS_READER_GATE_REMOVAL'; Old = 'if ($rootInactive -and $stdoutReaderComplete -and $stderrReaderComplete) {'; New = 'if ($rootInactive) {' },
+        [pscustomobject]@{ Code = 'MUTATION_KILLS_RESOURCE_GATE_PROCESS_INACTIVE_GATE_REMOVAL'; Old = 'if ($rootInactive -and $stdoutReaderComplete -and $stderrReaderComplete) {'; New = 'if ($stdoutReaderComplete -and $stderrReaderComplete) {' }
+    )
+    foreach ($mutation in $runtimeDisposalMutations) {
+        $mutant = Replace-ThriveLensStaticSourceOnce -Source $runtimeModule -Old $mutation.Old -New $mutation.New
+        $mutantTokens = $null
+        $mutantErrors = $null
+        $null = [Management.Automation.Language.Parser]::ParseInput($mutant, [ref]$mutantTokens, [ref]$mutantErrors)
+        Assert-Condition (
+            $mutant -cne $runtimeModule -and
+            @($mutantErrors).Count -eq 0 -and
+            -not (Test-ThriveLensRuntimeResourceRunnerDisposalContract -Source $mutant)
+        ) $mutation.Code
+    }
 
     Assert-Condition ($postgresInstaller -match 'WINDOWS_POSTGRES_INSTALL_DISABLED') 'POSTGRES_INSTALL_HARD_DISABLED'
     Assert-Condition ($postgresInstaller -notmatch '(?i)Expand-Archive|ZipArchive|Get-Item|Get-Content|Test-Path|Move-Item|Start-Process') 'POSTGRES_BLOCK_BEFORE_ARTIFACT_USE'
