@@ -2,162 +2,75 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Initialize', 'Runtime')]
-    [string]$Action = 'Runtime',
-    [ValidateSet('Backend', 'Python', 'PostgreSQL')]
-    [string]$InstallKind = 'Backend'
+    [ValidateSet('Install','Initialize','Runtime')][string]$Action = 'Runtime',
+    [ValidateSet('Backend','Python','PostgreSQL')][string]$InstallKind = 'Backend'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$modulePath = Join-Path $PSScriptRoot 'Runtime.psm1'
+$blockers = [Collections.Generic.List[string]]::new()
+$projection = [int64]0
+$wslProbed = $false
+$preflightLock = $null
+
+function Stop-ThriveLensPreflightDistro {
+    # Preflight never owns a running database. Under the lifecycle lock, prove
+    # there is no PostgreSQL process/listener before terminating the exact
+    # project distro that read-only probes may have launched.
+    Assert-ThriveLensWslAbsent
+    Assert-ThriveLensHostPortAbsent
+    $null = Assert-ThriveLensWslCleanupIdentity
+    Stop-ThriveLensDistroAndVerify
+    Assert-ThriveLensHostPortAbsent
+}
 
 try {
-    Import-Module -Name $modulePath -Force
+    Import-Module (Join-Path $PSScriptRoot 'Runtime.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot 'WslRuntime.psm1') -Force
+    $preflightLock=Enter-ThriveLensLifecycleLock
     $manifest = Get-ThriveLensManifest
-    $blockers = [Collections.Generic.List[string]]::new()
-
-    $projectionAvailable = $true
-    $projectedAdditionalBytes = switch ($Action) {
-        'Install' {
-            switch ($InstallKind) {
-                'Python' {
-                    if ($null -eq $manifest.resource_policy.python_worst_case_additional_bytes) {
-                        $projectionAvailable = $false
-                        $null
-                    }
-                    else { [int64]$manifest.resource_policy.python_worst_case_additional_bytes }
-                }
-                'PostgreSQL' { [int64]$manifest.resource_policy.postgresql_worst_case_additional_bytes }
-                default {
-                    if ($null -eq $manifest.resource_policy.worst_case_backend_additional_bytes) {
-                        $projectionAvailable = $false
-                        $null
-                    }
-                    else { [int64]$manifest.resource_policy.worst_case_backend_additional_bytes }
-                }
-            }
-        }
-        'Initialize' { [int64]$manifest.resource_policy.postgresql_initialization_worst_case_additional_bytes }
-        default { [int64]0 }
+    try{if (@($manifest.resource_policy.allowed_active_phases) -cnotcontains (Get-ThriveLensResourcePhase)) { $blockers.Add('RESOURCE_PHASE_NOT_ACTIVE') }}catch{$blockers.Add('RESOURCE_PHASE_UNAVAILABLE')}
+    if ($Action -eq 'Install') {
+        if ($InstallKind -eq 'Python' -or $InstallKind -eq 'Backend') { $blockers.Add('PYTHON_INSTALL_DISABLED_UNMEASURED_SCRATCH_CACHE') }
+        if ($InstallKind -eq 'PostgreSQL') { $projection = [int64]$manifest.resource_policy.postgresql_worst_case_additional_bytes }
     }
-    if (-not $projectionAvailable) { $blockers.Add('INSTALL_PROJECTION_UNAVAILABLE') }
-    $gateProjectedAdditionalBytes = if ($projectionAvailable) { [int64]$projectedAdditionalBytes } else { [int64]0 }
-    try { $null = Invoke-ThriveLensResourceGate -ProjectedAdditionalBytes $gateProjectedAdditionalBytes }
-    catch {
-        if ($_.Exception.Message -in @(
-            'PROJECTED_RESOURCE_CAP_EXCEEDED',
-            'PROJECTED_RESOURCE_HARD_STOP',
-            'PROJECTED_FREE_DISK_INSUFFICIENT'
-        )) {
-            $blockers.Add($_.Exception.Message)
-        }
-        else { $blockers.Add('RESOURCE_GATE_FAILED') }
+    elseif ($Action -eq 'Initialize') { $projection = [int64]$manifest.resource_policy.postgresql_initialization_worst_case_additional_bytes }
+    try { $null = Invoke-ThriveLensResourceGate -ProjectedAdditionalBytes $projection } catch { $code=$_.Exception.Message;if($code -notmatch '^[A-Z0-9_]+$'){$code='RESOURCE_GATE_FAILED'};$blockers.Add($code) }
+    $minimum = if ($Action -eq 'Install') { [int64]$manifest.resource_policy.install_minimum_free_memory_bytes } else { [int64]$manifest.resource_policy.runtime_minimum_free_memory_bytes }
+    try{if ((Get-ThriveLensFreeMemoryBytes) -lt $minimum) { $blockers.Add('LOW_FREE_MEMORY') }}catch{$blockers.Add('MEMORY_MEASUREMENT_UNAVAILABLE')}
+    if($blockers.Count -gt 0){
+        [pscustomobject]@{schema_version=1;status='BLOCKED';action=$Action;install_kind=if($Action -eq 'Install'){$InstallKind}else{$null};projected_additional_bytes=$projection;codes=@($blockers|Select-Object -Unique)}|ConvertTo-Json -Compress;exit 2
     }
-
-    try {
-        if (@($manifest.resource_policy.allowed_active_phases) -cnotcontains (Get-ThriveLensResourcePhase)) {
-            $blockers.Add('RESOURCE_PHASE_NOT_ACTIVE')
+    $wslProbed = $true
+    try { $null = Assert-ThriveLensWslIdentity } catch { $blockers.Add($_.Exception.Message) }
+    if($blockers.Count -gt 0){
+        try { Stop-ThriveLensPreflightDistro } catch {
+            [pscustomobject]@{schema_version=1;status='ERROR';action=$Action;codes=@('PREFLIGHT_DISTRO_CLEANUP_FAILED')}|ConvertTo-Json -Compress;exit 3
         }
+        [pscustomobject]@{schema_version=1;status='BLOCKED';action=$Action;install_kind=if($Action -eq 'Install'){$InstallKind}else{$null};projected_additional_bytes=$projection;codes=@($blockers|ForEach-Object{if($_ -match '^[A-Z0-9_]+$'){$_}else{'WSL_IDENTITY_FAILED'}}|Select-Object -Unique)}|ConvertTo-Json -Compress;exit 2
     }
-    catch { $blockers.Add('RESOURCE_PHASE_UNAVAILABLE') }
-
-    try {
-        $minimumBytes = if ($Action -eq 'Install') {
-            [int64]$manifest.resource_policy.install_minimum_free_memory_bytes
-        }
-        else {
-            [int64]$manifest.resource_policy.runtime_minimum_free_memory_bytes
-        }
-        if ((Get-ThriveLensFreeMemoryBytes) -lt $minimumBytes) {
-            $blockers.Add('LOW_FREE_MEMORY')
-        }
+    if ($Action -in @('Initialize','Runtime') -or ($Action -eq 'Install' -and $InstallKind -eq 'PostgreSQL')) {
+        try { Assert-ThriveLensWslPackages } catch { $blockers.Add($_.Exception.Message) }
     }
-    catch { $blockers.Add('MEMORY_MEASUREMENT_UNAVAILABLE') }
-
-    if ($Action -eq 'Install' -and $InstallKind -eq 'PostgreSQL' -and
-        -not [bool]$manifest.postgresql.windows_portable_install_enabled) {
-        $blockers.Add('WINDOWS_POSTGRES_INSTALL_DISABLED')
-        $blockers.Add('WSL_FALLBACK_REQUIRED_NOT_ACTIVATED')
+    if ($Action -eq 'Initialize') { try { Assert-ThriveLensDataInventoryGate } catch { $blockers.Add($_.Exception.Message) } }
+    try{Assert-ThriveLensWslInternalDisk -RequiredBytes $projection}catch{$blockers.Add($_.Exception.Message)}
+    if ($Action -eq 'Runtime') {
+        try{$clusterState=Get-ThriveLensWslClusterState;if($clusterState -ceq 'ABSENT'){$blockers.Add('POSTGRES_CLUSTER_UNAVAILABLE')}elseif($clusterState -cne 'VALID'){$blockers.Add('PARTIAL_CLUSTER_PRESENT')}}catch{$blockers.Add('CLUSTER_STATE_MEASUREMENT_UNAVAILABLE')}
     }
-    if ($Action -eq 'Install' -and $InstallKind -in @('Backend', 'Python') -and
-        -not [bool]$manifest.python.install_enabled) {
-        $blockers.Add('PYTHON_INSTALL_DISABLED_UNMEASURED_SCRATCH_CACHE')
+    try{if((Get-ThriveLensFreeMemoryBytes) -lt $minimum){$blockers.Add('LOW_FREE_MEMORY_AFTER_WSL_PROBES')}}catch{$blockers.Add('MEMORY_MEASUREMENT_UNAVAILABLE_AFTER_WSL_PROBES')}
+    try { Stop-ThriveLensPreflightDistro } catch {
+        [pscustomobject]@{schema_version=1;status='ERROR';action=$Action;codes=@('PREFLIGHT_DISTRO_CLEANUP_FAILED')}|ConvertTo-Json -Compress;exit 3
     }
-
-    if ($Action -in @('Initialize', 'Runtime')) {
-        $windowsRuntimeApproved = [string]$manifest.postgresql.portable_status -ceq 'VERIFIED_INSTALLED'
-        if (-not $windowsRuntimeApproved) {
-            $blockers.Add('WINDOWS_POSTGRES_RUNTIME_REJECTED')
-        }
-        if ([string]$manifest.wsl_fallback.status -cne 'ACTIVATED') {
-            $blockers.Add('WSL_FALLBACK_REQUIRED_NOT_ACTIVATED')
-        }
-        if ($Action -eq 'Initialize' -and [string]$manifest.data_inventory_gate.status -cne 'SATISFIED') {
-            $blockers.Add('DATA_INVENTORY_UPDATE_REQUIRED')
-        }
-        try {
-            $paths = Get-ThriveLensPostgresPaths
-            $binariesAvailable = $true
-            foreach ($requiredFile in @($paths.PgCtl, $paths.InitDb, $paths.Postgres, $paths.PgIsReady)) {
-                if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
-                    $blockers.Add('POSTGRES_BINARIES_UNAVAILABLE')
-                    $binariesAvailable = $false
-                    break
-                }
-            }
-            if ($binariesAvailable -and $windowsRuntimeApproved) {
-                try { Assert-ThriveLensPostgresVersions }
-                catch {
-                    if ($_.Exception.Message -in @(
-                        'POSTGRES_VERSION_OUTPUT_MISMATCH',
-                        'POSTGRES_VERSION_EXECUTION_FAILED',
-                        'POSTGRES_VERSION_EXECUTABLE_UNAVAILABLE'
-                    )) {
-                        $blockers.Add($_.Exception.Message)
-                    }
-                    else { throw }
-                }
-            }
-            if ($Action -eq 'Runtime' -and -not (Test-Path -LiteralPath (Join-Path $paths.DataRoot 'PG_VERSION') -PathType Leaf)) {
-                $blockers.Add('POSTGRES_CLUSTER_UNAVAILABLE')
-            }
-            $listeners = @(Get-ThriveLensPostgresListeners)
-            if ($listeners.Count -gt 0 -and
-                (-not $windowsRuntimeApproved -or -not (Test-ThriveLensPostgresRunning))) {
-                $blockers.Add('POSTGRES_PORT_ALREADY_IN_USE')
-            }
-        }
-        catch { $blockers.Add('POSTGRES_PATH_POLICY_FAILED') }
-    }
-
     if ($blockers.Count -gt 0) {
-        [pscustomobject]@{
-            schema_version = 1
-            status = 'BLOCKED'
-            action = $Action
-            install_kind = if ($Action -eq 'Install') { $InstallKind } else { $null }
-            projected_additional_bytes = $projectedAdditionalBytes
-            codes = @($blockers | Select-Object -Unique)
-        } | ConvertTo-Json -Compress
+        $safeCodes=@($blockers|ForEach-Object{if($_ -match '^[A-Z0-9_]+$'){$_}else{'WSL_VALIDATION_FAILED'}}|Select-Object -Unique)
+        [pscustomobject]@{ schema_version=1; status='BLOCKED'; action=$Action; install_kind=if($Action -eq 'Install'){$InstallKind}else{$null}; projected_additional_bytes=$projection; codes=$safeCodes } | ConvertTo-Json -Compress
         exit 2
     }
-
-    [pscustomobject]@{
-        schema_version = 1
-        status = 'READY'
-        action = $Action
-        install_kind = if ($Action -eq 'Install') { $InstallKind } else { $null }
-        projected_additional_bytes = $projectedAdditionalBytes
-        codes = @()
-    } | ConvertTo-Json -Compress
+    [pscustomobject]@{ schema_version=1; status='READY'; action=$Action; install_kind=if($Action -eq 'Install'){$InstallKind}else{$null}; projected_additional_bytes=$projection; codes=@() } | ConvertTo-Json -Compress
 }
 catch {
-    [pscustomobject]@{
-        schema_version = 1
-        status = 'ERROR'
-        action = $Action
-        codes = @('PREFLIGHT_INTERNAL_ERROR')
-    } | ConvertTo-Json -Compress
+    if($wslProbed){try{Stop-ThriveLensPreflightDistro}catch{}}
+    [pscustomobject]@{ schema_version=1; status='ERROR'; action=$Action; codes=@('PREFLIGHT_INTERNAL_ERROR') } | ConvertTo-Json -Compress
     exit 3
 }
+finally{if($null -ne $preflightLock){Exit-ThriveLensLifecycleLock -Mutex $preflightLock}}

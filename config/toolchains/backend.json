@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "task_id": "TL-R0-003",
-  "status": "BLOCKED_FOUNDATION_REQUIRES_HUMAN_AUTHORITY_AND_ACCOUNTING",
+  "status": "WSL_POSTGRES_PACKAGES_VERIFIED_CLUSTER_PENDING",
   "target": {
     "os": "windows",
     "architecture": "x86_64",
@@ -18,7 +18,8 @@
     "python_known_artifact_and_target_bytes": 297888400,
     "python_worst_case_additional_bytes": null,
     "python_projection_status": "INCOMPLETE_TEMP_AND_PERSISTENT_INSTALLER_CACHE_UNMEASURED",
-    "postgresql_worst_case_additional_bytes": 1340560230,
+    "postgresql_worst_case_additional_bytes": 251000000,
+    "wsl_foundation_projection_scope": "PACKAGE_ONLY_CEILING_EXCLUDES_UBUNTU_DISTRO_VHD_AND_APT_METADATA",
     "postgresql_initialization_worst_case_additional_bytes": 134217728,
     "worst_case_backend_additional_bytes": null
   },
@@ -105,8 +106,89 @@
   },
   "wsl_fallback": {
     "trigger": "Required because the EDB portable Windows archive is rejected for runtime.",
-    "status": "REQUIRED_BUT_NOT_ACTIVATED",
-    "human_system_authority": "REQUIRED",
+    "status": "ACTIVATED_PACKAGES_VERIFIED",
+    "human_system_authority": "AUTHORIZED_2026-08-12_FOR_DEDICATED_DISTRO_ONLY",
+    "wsl_version": "2.6.3.0",
+    "distribution_name": "ThriveLens-R0",
+    "distribution_version": 2,
+    "distribution_install_root": "%LOCALAPPDATA%\\ThriveLens\\wsl\\ThriveLens-R0",
+    "distribution_vhd_filename": "ext4.vhdx",
+    "maximum_vhd_bytes": 6442450944,
+    "ubuntu_release": "24.04",
+    "ubuntu_image": {
+      "release": "24.04.4 LTS",
+      "artifact_filename": "ubuntu-24.04.4-wsl-amd64.wsl",
+      "artifact_url": "https://releases.ubuntu.com/24.04.4/ubuntu-24.04.4-wsl-amd64.wsl",
+      "listed_compressed_size": "373M",
+      "compressed_size_bytes": 391541571,
+      "sha256": "9b2f7730dc68227dd04a9f3e5eab86ad85caf556b8606ad94f1f29ff5c4fd3f5",
+      "sha256sums_url": "https://releases.ubuntu.com/24.04.4/SHA256SUMS",
+      "sha256sums_signature_url": "https://releases.ubuntu.com/24.04.4/SHA256SUMS.gpg",
+      "publisher_metadata_checked_at": "2026-08-12",
+      "checksums_signature_status": "SHA256SUMS_AND_GPG_PUBLISHED",
+      "web_download_payload_retention_status": "NOT_RETAINED",
+      "current_vhd_byte_attestation": "NOT_ATTESTED_BY_RECORDED_UPSTREAM_HASH",
+      "installed_artifact_attestation": "NOT_CAPTURED_WSL_WEB_DOWNLOAD_DOES_NOT_BIND_CURRENT_VHD_TO_RECORDED_UPSTREAM_HASH"
+    },
+    "measurement_snapshot": {
+      "observed_at": "2026-08-12",
+      "method": "LIGHTWEIGHT_READ_ONLY_WINDOWS_FILE_LENGTH_AND_AGGREGATE_ROOT_MEASUREMENT",
+      "vhd_file_bytes": 2131755008,
+      "aggregate_counted_bytes": 2134150647,
+      "aggregate_scope": "%LOCALAPPDATA%\\ThriveLens_WITH_NESTED_TASK_WORKTREE_DEDUPLICATED",
+      "attestation_limit": "POINT_IN_TIME_SIZE_OBSERVATION_ONLY_NOT_AN_UPSTREAM_IMAGE_BYTE_ATTESTATION"
+    },
+    "pgdg": {
+      "suite": "noble-pgdg",
+      "component": "main",
+      "architecture": "amd64",
+      "signing_key_fingerprint": "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8",
+      "keyring_path": "/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc",
+      "keyring_sha256": "0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76",
+      "source_path": "/etc/apt/sources.list.d/pgdg.sources",
+      "source_sha256": "8159f38d5636bdf6f2f589db114d139d3bdf064aa91ed941128c8b6a7eabddd7",
+      "source_contract": "Types: deb; URIs: https://apt.postgresql.org/pub/repos/apt; Suites: noble-pgdg; Architectures: amd64; Components: main; Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc",
+      "policy_rc_d_path": "/usr/sbin/policy-rc.d",
+      "policy_rc_d_sha256": "c2bcd9decf63ff2c0d9f473f38bc3607900530aad80f99139855d56678456230",
+      "createcluster_path": "/etc/postgresql-common/createcluster.conf",
+      "createcluster_sha256": "44975c812656bcecd1828233e8a1b97f06f0cab14359bddd73e2b33be755ca2c",
+      "inrelease_signature_required": true,
+      "apt_reported_archive_size": "48.4 MB",
+      "apt_reported_installed_size": "201 MB",
+      "apt_reported_size_precision": "ROUNDED_DISPLAY_VALUES_NOT_EXACT_BYTE_ATTESTATION",
+      "package_archive_ceiling_bytes": 50000000,
+      "installed_package_ceiling_bytes": 201000000,
+      "package_only_ceiling_bytes": 251000000,
+      "package_only_ceiling_scope": "POSTGRESQL_PACKAGE_ARCHIVES_AND_INSTALLED_PACKAGES_ONLY_EXCLUDES_UBUNTU_DISTRO_VHD_AND_APT_METADATA",
+      "postgresql_license": "PostgreSQL License",
+      "postgresql_license_url": "https://www.postgresql.org/about/licence/",
+      "installed_package_license_metadata_status": "POSTGRESQL_AND_UBUNTU_PACKAGE_COPYRIGHT_METADATA_PRESENT",
+      "dependency_license_inventory_status": "NOT_INDEPENDENTLY_ENUMERATED_OR_APPROVED",
+      "license_limitation": "Installed package copyright metadata is present; no independent dependency licence inventory or production approval is claimed.",
+      "package_closure": [
+        {"name": "libjson-perl", "version": "4.10000-1", "architecture": "all"},
+        {"name": "postgresql-client-common", "version": "293.pgdg24.04+1", "architecture": "all"},
+        {"name": "ssl-cert", "version": "1.1.2ubuntu1", "architecture": "all"},
+        {"name": "postgresql-common", "version": "293.pgdg24.04+1", "architecture": "all"},
+        {"name": "libllvm19", "version": "1:19.1.1-1ubuntu1~24.04.2", "architecture": "amd64"},
+        {"name": "libpq5", "version": "18.4-1.pgdg24.04+1", "architecture": "amd64"},
+        {"name": "libxslt1.1", "version": "1.1.39-0exp1ubuntu0.24.04.3", "architecture": "amd64"},
+        {"name": "postgresql-client-17", "version": "17.10-1.pgdg24.04+1", "architecture": "amd64"},
+        {"name": "postgresql-17", "version": "17.10-1.pgdg24.04+1", "architecture": "amd64"}
+      ],
+      "top_level_packages": [
+        {"name": "postgresql-common", "version": "293.pgdg24.04+1"},
+        {"name": "postgresql-client-17", "version": "17.10-1.pgdg24.04+1"},
+        {"name": "postgresql-17", "version": "17.10-1.pgdg24.04+1"}
+      ],
+      "held_packages": ["libjson-perl", "libllvm19", "libpq5", "libxslt1.1", "postgresql-17", "postgresql-client-17", "postgresql-client-common", "postgresql-common", "ssl-cert"]
+    },
+    "service_policy": "SYSTEMD_PRESENT_POSTGRESQL_UNITS_MASKED_MANUAL_PG_CTL_ONLY",
+    "cluster_data_root": "/var/lib/thrivelens/postgresql/r0",
+    "cluster_log_root": "/var/log/thrivelens/postgresql/r0",
+    "logs_persisted": false,
+    "host_secret_root": "%LOCALAPPDATA%\\ThriveLens\\secrets",
+    "host_password_file": "%LOCALAPPDATA%\\ThriveLens\\secrets\\postgres-r0-bootstrap.pw",
     "package_integrity_policy": "Pin an exact supported PostgreSQL package version and verify distribution-signed repository metadata before installation.",
     "storage_policy": "Create a dedicated ThriveLens WSL storage location and add it to aggregate accounting before package or cluster bytes are written.",
     "constraints": [
@@ -161,10 +243,21 @@
   },
   "data_inventory_gate": {
     "required_before": "postgresql_initialization",
-    "status": "REQUIRED_NOT_SATISFIED",
+    "status": "SATISFIED",
     "owned_document": "docs/privacy/DATA_INVENTORY.md",
-    "ownership_note": "The required inventory update is outside TL-R0-003 owned paths and must be completed by the integration owner before initialization."
+    "ownership_note": "The integration owner added the required WSL distribution and PostgreSQL cluster infrastructure rows; TL-R0-003 scripts only verify that owned document before initialization."
+  },
+  "tl_r0_004_handoff": {
+    "availability_gate": "TL-R0-003_VERIFIED_WITH_TWO_CYCLE_RUNTIME_PASS",
+    "host": "127.0.0.1",
+    "port": 55432,
+    "maintenance_database": "postgres",
+    "bootstrap_role": "tl_bootstrap",
+    "bootstrap_password_file": "%LOCALAPPDATA%\\ThriveLens\\secrets\\postgres-r0-bootstrap.pw",
+    "target_application_database": "thrivelens_r0",
+    "tl_r0_004_owns": ["target_application_database_creation", "migration_role", "runtime_role", "baseline_migration", "single_migration_head"],
+    "secret_output_policy": "NEVER_EMIT_OR_RETAIN_SECRET_OR_DSN"
   },
   "provenance_observed_at": "2026-08-12",
-  "provisioning_status": "NO_ARTIFACT_DOWNLOADED_NO_LICENSE_ACCEPTED_NO_SERVICE_STARTED_NO_CREDENTIAL_CREATED"
+  "provisioning_status": "DEDICATED_WSL_AND_EXACT_PACKAGES_PRESENT_ZERO_CLUSTER_PROCESS_LISTENER"
 }

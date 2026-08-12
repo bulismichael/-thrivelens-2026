@@ -3,6 +3,101 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if (-not ('ThriveLens.ExclusiveFileSnapshot' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace ThriveLens {
+    public sealed class ExclusiveFileSnapshot {
+        public string FinalPath { get; private set; }
+        public string Identity { get; private set; }
+        public long Length { get; private set; }
+        public FileAttributes Attributes { get; private set; }
+        public uint LinkCount { get; private set; }
+
+        ExclusiveFileSnapshot(
+            string finalPath,
+            string identity,
+            long length,
+            FileAttributes attributes,
+            uint linkCount
+        ) {
+            FinalPath = finalPath;
+            Identity = identity;
+            Length = length;
+            Attributes = attributes;
+            LinkCount = linkCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct ByHandleFileInformation {
+            public uint FileAttributes;
+            public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GetFileInformationByHandle(
+            SafeFileHandle file,
+            out ByHandleFileInformation information
+        );
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern uint GetFinalPathNameByHandle(
+            SafeFileHandle file,
+            StringBuilder path,
+            uint pathLength,
+            uint flags
+        );
+
+        public static ExclusiveFileSnapshot Capture(SafeFileHandle file) {
+            if (file == null || file.IsInvalid || file.IsClosed) {
+                throw new IOException("FILE_IDENTITY_UNAVAILABLE");
+            }
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(file, out information)) {
+                throw new IOException("FILE_IDENTITY_UNAVAILABLE");
+            }
+
+            uint capacity = 512;
+            StringBuilder path = new StringBuilder((int)capacity);
+            uint written = GetFinalPathNameByHandle(file, path, capacity, 0);
+            if (written == 0) {
+                throw new IOException("FILE_FINAL_PATH_UNAVAILABLE");
+            }
+            if (written >= capacity) {
+                capacity = checked(written + 1);
+                path = new StringBuilder((int)capacity);
+                written = GetFinalPathNameByHandle(file, path, capacity, 0);
+                if (written == 0 || written >= capacity) {
+                    throw new IOException("FILE_FINAL_PATH_UNAVAILABLE");
+                }
+            }
+
+            long length = ((long)information.FileSizeHigh << 32) | information.FileSizeLow;
+            string identity = information.VolumeSerialNumber.ToString("X8") + ":" +
+                information.FileIndexHigh.ToString("X8") + information.FileIndexLow.ToString("X8");
+            return new ExclusiveFileSnapshot(
+                path.ToString(), identity, length,
+                (FileAttributes)information.FileAttributes, information.NumberOfLinks
+            );
+        }
+    }
+}
+'@
+}
+
 function Get-ThriveLensProjectRoot {
     $root = Join-Path $PSScriptRoot '..\..\..'
     return (Resolve-Path -LiteralPath $root).Path
@@ -306,15 +401,88 @@ function Assert-ThriveLensPathOutsideDirectory {
     return $other
 }
 
-function Assert-ThriveLensSecretFileAcl {
-    param([Parameter(Mandatory)][string]$Path)
-    if (-not $IsWindows) { throw 'SECRET_ACL_WINDOWS_REQUIRED' }
-    $secretPath = Assert-ThriveLensOwnedPath -Path $Path
-    if (-not (Test-Path -LiteralPath $secretPath -PathType Leaf)) { throw 'SECRET_FILE_UNAVAILABLE' }
-    $acl = Get-Acl -LiteralPath $secretPath
-    if (-not $acl.AreAccessRulesProtected) { throw 'SECRET_ACL_INHERITANCE_ENABLED' }
+function ConvertTo-ThriveLensSidValue {
+    param(
+        [Parameter(Mandatory)]
+        [Security.Principal.IdentityReference]$Identity,
+        [Parameter(Mandatory)]
+        [string]$FailureCode
+    )
+    try {
+        return $Identity.Translate([Security.Principal.SecurityIdentifier]).Value
+    }
+    catch {
+        throw $FailureCode
+    }
+}
+
+function Get-ThriveLensSecretAclContext {
     $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $allowedSids = @($currentSid, 'S-1-5-18', 'S-1-5-32-544')
+    return [pscustomobject]@{
+        CurrentSid = $currentSid
+        AllowedSids = @($currentSid, 'S-1-5-18', 'S-1-5-32-544')
+    }
+}
+
+function Assert-ThriveLensSecretRootAcl {
+    param([Parameter(Mandatory)][string]$Path)
+
+    try { $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop }
+    catch { throw 'SECRET_ROOT_ACL_UNAVAILABLE' }
+    if (-not $acl.AreAccessRulesProtected) { throw 'SECRET_ROOT_ACL_INHERITANCE_ENABLED' }
+
+    $context = Get-ThriveLensSecretAclContext
+    try { $ownerSid = ([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value }
+    catch {
+        try { $ownerSid = ([Security.Principal.SecurityIdentifier]$acl.Owner).Value }
+        catch { throw 'SECRET_ROOT_ACL_OWNER_UNVERIFIABLE' }
+    }
+    if ($context.AllowedSids -notcontains $ownerSid) { throw 'SECRET_ROOT_ACL_OWNER_REJECTED' }
+
+    $requiredRead = [Security.AccessControl.FileSystemRights]::ReadData -bor
+        [Security.AccessControl.FileSystemRights]::ReadAttributes -bor
+        [Security.AccessControl.FileSystemRights]::ReadExtendedAttributes -bor
+        [Security.AccessControl.FileSystemRights]::ReadPermissions
+    $currentUserAllowed = [Security.AccessControl.FileSystemRights]0
+    $currentUserDenied = [Security.AccessControl.FileSystemRights]0
+    foreach ($rule in $acl.Access) {
+        if ($rule.IsInherited) { throw 'SECRET_ROOT_ACL_INHERITED_RULE_REJECTED' }
+        $sid = ConvertTo-ThriveLensSidValue `
+            -Identity $rule.IdentityReference `
+            -FailureCode 'SECRET_ROOT_ACL_IDENTITY_UNVERIFIABLE'
+        if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow) {
+            # Restrict every Allow ACE, including inherit-only ACEs which could
+            # otherwise permit replacement or deletion of the fixed child.
+            if ($context.AllowedSids -notcontains $sid) {
+                throw 'SECRET_ROOT_ACL_ALLOWLIST_VIOLATION'
+            }
+        }
+        if ($sid -cne $context.CurrentSid -or
+            ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) {
+            continue
+        }
+        if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow) {
+            $currentUserAllowed = $currentUserAllowed -bor $rule.FileSystemRights
+        }
+        elseif ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny) {
+            $currentUserDenied = $currentUserDenied -bor $rule.FileSystemRights
+        }
+    }
+    if (($currentUserAllowed -band $requiredRead) -ne $requiredRead -or
+        ($currentUserDenied -band $requiredRead) -ne 0) {
+        throw 'SECRET_ROOT_ACL_CURRENT_USER_READ_MISSING'
+    }
+}
+
+function Assert-ThriveLensSecretFileAclRules {
+    param([Parameter(Mandatory)][string]$Path)
+
+    try { $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop }
+    catch { throw 'SECRET_ACL_UNAVAILABLE' }
+    if (-not $acl.AreAccessRulesProtected) { throw 'SECRET_ACL_INHERITANCE_ENABLED' }
+    $context = Get-ThriveLensSecretAclContext
+    $currentSid = $context.CurrentSid
+    $allowedSids = $context.AllowedSids
     $ownerSid = $acl.Owner
     try { $ownerSid = ([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value }
     catch {
@@ -341,11 +509,148 @@ function Assert-ThriveLensSecretFileAcl {
         }
     }
     if (-not $currentUserCanRead) { throw 'SECRET_ACL_CURRENT_USER_READ_MISSING' }
+}
+
+function Assert-ThriveLensSecretFileAcl {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not $IsWindows) { throw 'SECRET_ACL_WINDOWS_REQUIRED' }
+    $secretPath = Assert-ThriveLensOwnedPath -Path $Path
+    if (-not (Test-Path -LiteralPath $secretPath -PathType Leaf)) { throw 'SECRET_FILE_UNAVAILABLE' }
+    Assert-ThriveLensSecretFileAclRules -Path $secretPath
     try {
         $probe = [IO.File]::Open($secretPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         $probe.Dispose()
     }
     catch { throw 'SECRET_ACL_CURRENT_USER_READ_UNAVAILABLE' }
+}
+
+function ConvertFrom-ThriveLensFinalPath {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if ($Path.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
+        return '\\' + $Path.Substring(8)
+    }
+    if ($Path.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) {
+        return $Path.Substring(4)
+    }
+    return $Path
+}
+
+function Read-ThriveLensPostgresBootstrapSecret {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not $IsWindows) { throw 'SECRET_ACL_WINDOWS_REQUIRED' }
+    $countedRoot = Get-ThriveLensAttributableRoot
+    $secretRoot = [IO.Path]::GetFullPath((Join-Path $countedRoot 'secrets')).TrimEnd('\')
+    $expectedPath = [IO.Path]::GetFullPath((Join-Path $secretRoot 'postgres-r0-bootstrap.pw'))
+    try {
+        $candidate = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($Path))
+    }
+    catch { throw 'PASSWORD_FILE_PATH_INVALID' }
+    if ($candidate -cne $expectedPath) { throw 'PASSWORD_FILE_PATH_MISMATCH' }
+
+    foreach ($component in @($countedRoot, $secretRoot, $expectedPath)) {
+        if (-not (Test-Path -LiteralPath $component)) { throw 'PASSWORD_FILE_PATH_UNAVAILABLE' }
+        try { $item = Get-Item -LiteralPath $component -Force -ErrorAction Stop }
+        catch { throw 'PASSWORD_FILE_PATH_UNAVAILABLE' }
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'PASSWORD_FILE_REPARSE_REJECTED'
+        }
+    }
+    if (-not (Test-Path -LiteralPath $secretRoot -PathType Container) -or
+        -not (Test-Path -LiteralPath $expectedPath -PathType Leaf)) {
+        throw 'PASSWORD_FILE_PATH_TYPE_INVALID'
+    }
+
+    Assert-ThriveLensSecretRootAcl -Path $secretRoot
+    Assert-ThriveLensSecretFileAclRules -Path $expectedPath
+
+    $stream = $null
+    $bytes = $null
+    try {
+        try {
+            $stream = [IO.FileStream]::new(
+                $expectedPath,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::None,
+                128,
+                [IO.FileOptions]::SequentialScan
+            )
+        }
+        catch { throw 'PASSWORD_FILE_EXCLUSIVE_OPEN_FAILED' }
+
+        try { $before = [ThriveLens.ExclusiveFileSnapshot]::Capture($stream.SafeFileHandle) }
+        catch { throw 'PASSWORD_FILE_IDENTITY_UNAVAILABLE' }
+        $beforePath = ConvertFrom-ThriveLensFinalPath -Path $before.FinalPath
+        if (-not $beforePath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'PASSWORD_FILE_FINAL_PATH_MISMATCH'
+        }
+        if (($before.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            ($before.Attributes -band [IO.FileAttributes]::Directory) -ne 0 -or
+            $before.LinkCount -ne 1) {
+            throw 'PASSWORD_FILE_IDENTITY_REJECTED'
+        }
+        if ($before.Length -lt 1 -or $before.Length -gt 129) {
+            throw 'PASSWORD_FILE_SIZE_INVALID'
+        }
+
+        $bytes = [byte[]]::new([int]$before.Length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            try { $read = $stream.Read($bytes, $offset, $bytes.Length - $offset) }
+            catch { throw 'PASSWORD_FILE_READ_FAILED' }
+            if ($read -le 0) { throw 'PASSWORD_FILE_READ_INCOMPLETE' }
+            $offset += $read
+        }
+
+        try { $after = [ThriveLens.ExclusiveFileSnapshot]::Capture($stream.SafeFileHandle) }
+        catch { throw 'PASSWORD_FILE_IDENTITY_UNAVAILABLE' }
+        $afterPath = ConvertFrom-ThriveLensFinalPath -Path $after.FinalPath
+        if (-not $afterPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase) -or
+            $afterPath -cne $beforePath -or
+            $after.Identity -cne $before.Identity -or
+            $after.Length -ne $before.Length -or
+            $after.Attributes -ne $before.Attributes -or
+            $after.LinkCount -ne $before.LinkCount) {
+            throw 'PASSWORD_FILE_IDENTITY_CHANGED'
+        }
+
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and
+            $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            throw 'PASSWORD_FILE_BOM_REJECTED'
+        }
+        try { $value = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) }
+        catch { throw 'PASSWORD_FILE_ENCODING_INVALID' }
+        if ($value.EndsWith("`r`n", [StringComparison]::Ordinal)) {
+            $value = $value.Substring(0, $value.Length - 2)
+        }
+        elseif ($value.EndsWith("`n", [StringComparison]::Ordinal)) {
+            $value = $value.Substring(0, $value.Length - 1)
+        }
+        if ($value -match '[\x00-\x1F\x7F]' -or $value.Contains(':') -or
+            $value.Contains('\') -or $value -cnotmatch '^[A-Za-z0-9_-]{43,128}$' -or
+            $value -match '(?i)^(?:password|postgres|thrivelens|changeme|change_me|test|testing|secret|placeholder|example|default|demo|admin|root|letmein|qwerty)' -or
+            $value -match '(?i)(?:sentinel|not[_-]?a[_-]?real|dummy|placeholder|changeme)' -or
+            $value -match '^(.)\1{42,}$') {
+            throw 'PASSWORD_FILE_INVALID'
+        }
+
+        Assert-ThriveLensSecretRootAcl -Path $secretRoot
+        Assert-ThriveLensSecretFileAclRules -Path $expectedPath
+        foreach ($component in @($countedRoot, $secretRoot, $expectedPath)) {
+            try { $item = Get-Item -LiteralPath $component -Force -ErrorAction Stop }
+            catch { throw 'PASSWORD_FILE_PATH_UNAVAILABLE' }
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'PASSWORD_FILE_REPARSE_REJECTED'
+            }
+        }
+        return $value
+    }
+    finally {
+        if ($null -ne $bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
 }
 
 function Resolve-ThriveLensStartChildFailure {
@@ -514,6 +819,7 @@ Export-ModuleMember -Function @(
     'Assert-ThriveLensComposeDataDirectory',
     'Assert-ThriveLensPathOutsideDirectory',
     'Assert-ThriveLensSecretFileAcl',
+    'Read-ThriveLensPostgresBootstrapSecret',
     'Resolve-ThriveLensStartChildFailure',
     'Resolve-ThriveLensRuntimeFailureOutcome',
     'Assert-ThriveLensVersionText',

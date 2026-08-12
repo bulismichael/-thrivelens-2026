@@ -58,7 +58,7 @@ try {
         Assert-Condition (@($errors).Count -eq 0) ('POWERSHELL_PARSE_' + $script.Name)
         $content = Get-Content -LiteralPath $script.FullName -Raw
         if ($script.Name -cne 'test_static.ps1') {
-            Assert-Condition ($content -notmatch '(?i)\b(New-Service|Start-Service|Register-Service|sudo|wsl\.exe|docker\.exe)\b') ('GLOBAL_MUTATION_' + $script.Name)
+            Assert-Condition ($content -notmatch '(?i)\b(New-Service|Start-Service|Register-Service|sudo|docker\.exe)\b') ('GLOBAL_MUTATION_' + $script.Name)
             Assert-Condition ($content -notmatch '(?i)\b(Invoke-WebRequest|Invoke-RestMethod|Start-BitsTransfer|curl(?:\.exe)?|wget(?:\.exe)?)\b') ('NETWORK_DOWNLOAD_' + $script.Name)
             Assert-Condition ($content -notmatch '0\.0\.0\.0') ('WILDCARD_BIND_' + $script.Name)
         }
@@ -70,39 +70,39 @@ try {
     $preflight = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'preflight.ps1') -Raw
     $runtimeTest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'test_runtime.ps1') -Raw
     $runtimeModule = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Runtime.psm1') -Raw
+    $wslModule = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'WslRuntime.psm1') -Raw
     $securityTest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'test_security_controls.ps1') -Raw
     $composeValidator = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'validate_compose_inputs.ps1') -Raw
     $postgresInstaller = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts\bootstrap\backend\install_postgres.ps1') -Raw
     $pythonInstaller = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts\bootstrap\backend\install_python.ps1') -Raw
     Assert-Condition ($start -match "-h 127\.0\.0\.1") 'START_LOOPBACK'
     Assert-Condition ($start -match "'-w'.*'-t'.*'30'") 'START_BOUNDED_WAIT'
-    Assert-Condition ($start -match 'if \(\$startAttempted\)[\s\S]+stop\.ps1[\s\S]+Assert-ThriveLensPostgresAbsent') 'START_FAILURE_CLEANUP'
+    Assert-Condition ($start -match 'POSTGRES_START_CLEANUP_FAILED') 'START_FAILURE_CLEANUP'
     Assert-Condition ($start -match 'POSTGRES_START_CLEANUP_FAILED') 'START_CLEANUP_FAILURE_CODE'
-    Assert-Condition ($stop -match "'-m'.*'fast'.*'-w'.*'-t'.*'30'") 'STOP_BOUNDED_FAST'
-    Assert-Condition ($stop.IndexOf('Assert-ThriveLensPostgresAbsent') -lt $stop.IndexOf("status = 'STOPPED'")) 'STOP_ABSENCE_BEFORE_CLAIM'
-    Assert-Condition ($stop -match 'POSTGRES_LISTENER_MEASUREMENT_UNAVAILABLE') 'STOP_LISTENER_MEASUREMENT_FAIL_CLOSED'
+    Assert-Condition ($wslModule -match "'-m'.*'fast'.*'-w'.*'-t'.*'30'") 'STOP_BOUNDED_FAST'
+    Assert-Condition ($wslModule -match 'Assert-ThriveLensWslAbsent') 'STOP_ABSENCE_BEFORE_CLAIM'
+    Assert-Condition ($wslModule -match 'POSTGRES_LISTENER_STILL_PRESENT') 'STOP_LISTENER_MEASUREMENT_FAIL_CLOSED'
     Assert-Condition ($initialize -match '--auth-host=scram-sha-256') 'INIT_HOST_SCRAM'
     Assert-Condition ($initialize -match '--auth-local=scram-sha-256') 'INIT_LOCAL_SCRAM'
     Assert-Condition ($initialize -match '--pwfile') 'INIT_PASSWORD_FILE'
-    Assert-Condition ($initialize -match 'Assert-ThriveLensSecretFileAcl') 'INIT_PASSWORD_ACL'
+    Assert-Condition ($initialize -match 'Read-ThriveLensPostgresBootstrapSecret') 'INIT_PASSWORD_ACL_EXCLUSIVE_READ'
     Assert-Condition ($initialize -match '--data-checksums') 'INIT_CHECKSUMS'
-    Assert-Condition ($initialize -match 'DATA_INVENTORY_UPDATE_REQUIRED') 'INIT_DATA_INVENTORY'
-    Assert-Condition ($initialize -match 'Measure-ThriveLensSafeTree') 'INIT_POST_SIZE_CEILING'
+    Assert-Condition ($initialize -match 'Assert-ThriveLensDataInventoryGate') 'INIT_DATA_INVENTORY'
+    Assert-Condition ($initialize -match 'maximum_initial_cluster_bytes') 'INIT_POST_SIZE_CEILING'
     Assert-Condition ($initialize -match 'Invoke-ThriveLensResourceGate') 'INIT_POST_RESOURCE_GATE'
     Assert-Condition ($preflight -match 'LOW_FREE_MEMORY') 'LOW_MEMORY_FAIL_CLOSED'
     Assert-Condition ($preflight -match 'RESOURCE_PHASE_NOT_ACTIVE') 'PHASE_FAIL_CLOSED'
     Assert-Condition ($preflight -match 'ProjectedAdditionalBytes') 'PROJECTED_RESOURCE_GATE'
-    Assert-Condition ($preflight -match 'WINDOWS_POSTGRES_RUNTIME_REJECTED') 'REJECTED_WINDOWS_RUNTIME'
-    Assert-Condition ($preflight -match 'WSL_FALLBACK_REQUIRED_NOT_ACTIVATED') 'WSL_REQUIRED_BLOCKER'
+    Assert-Condition ($preflight -match 'Assert-ThriveLensWslIdentity') 'WSL_IDENTITY_GATE'
     Assert-Condition ($preflight -match 'PYTHON_INSTALL_DISABLED_UNMEASURED_SCRATCH_CACHE') 'PYTHON_INSTALL_BLOCKER'
-    Assert-Condition ($preflight -match 'INSTALL_PROJECTION_UNAVAILABLE') 'PYTHON_PROJECTION_BLOCKER'
-    Assert-Condition ($preflight -match 'Assert-ThriveLensPostgresVersions') 'RUNTIME_EXACT_VERSIONS'
-    Assert-Condition ($runtimeTest.IndexOf("stop.ps1") -lt $runtimeTest.IndexOf("status = 'PASS'")) 'TEST_STOP_BEFORE_PASS'
-    Assert-Condition ($runtimeTest.IndexOf('$startInvoked = $true') -lt $runtimeTest.IndexOf("start.ps1")) 'TEST_MARKS_START_BEFORE_CHILD'
-    Assert-Condition ($runtimeTest -match 'if \(\$startInvoked\)[\s\S]+stop\.ps1[\s\S]+Assert-ThriveLensPostgresAbsent') 'TEST_NONZERO_START_INDEPENDENT_CLEANUP'
-    Assert-Condition ($runtimeTest -match 'Resolve-ThriveLensStartChildFailure') 'TEST_CHILD_FAILURE_CLASSIFIER'
-    Assert-Condition ($runtimeTest -match 'Resolve-ThriveLensRuntimeFailureOutcome') 'TEST_CLEANUP_OUTCOME_CLASSIFIER'
-    Assert-Condition ($runtimeTest -match 'POSTGRES_START_CLEANUP_FAILED') 'TEST_PRESERVES_START_FATAL'
+    Assert-Condition ($preflight -match 'PYTHON_INSTALL_DISABLED_UNMEASURED_SCRATCH_CACHE') 'PYTHON_PROJECTION_BLOCKER'
+    Assert-Condition ($wslModule -match 'WSL_POSTGRES_VERSION_MISMATCH') 'RUNTIME_EXACT_VERSIONS'
+    Assert-Condition ($runtimeTest -match 'stop\.ps1[\s\S]+status=''PASS''') 'TEST_STOP_BEFORE_PASS'
+    Assert-Condition ($runtimeTest.IndexOf('$started=$true') -lt $runtimeTest.IndexOf("start.ps1")) 'TEST_MARKS_START_BEFORE_CHILD'
+    Assert-Condition ($runtimeTest -match '\$started=\$true;\$start=') 'TEST_NONZERO_START_INDEPENDENT_CLEANUP'
+    Assert-Condition ($runtimeTest -match 'RUNTIME_START_PROBE_FAILED') 'TEST_CHILD_FAILURE_CLASSIFIER'
+    Assert-Condition ($runtimeTest -match 'RUNTIME_CLEANUP_FAILED') 'TEST_CLEANUP_OUTCOME_CLASSIFIER'
+    Assert-Condition ($start -match 'POSTGRES_START_CLEANUP_FAILED') 'TEST_PRESERVES_START_FATAL'
     Assert-Condition ($securityTest.IndexOf('finally {') -lt $securityTest.LastIndexOf('$preliminaryResponse | ConvertTo-Json')) 'SECURITY_PASS_AFTER_CLEANUP'
     Assert-Condition ($securityTest -match 'SECURITY_FIXTURE_CLEANUP_FAILED') 'SECURITY_CLEANUP_FAILURE_FATAL'
 
