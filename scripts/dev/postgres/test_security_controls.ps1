@@ -134,6 +134,34 @@ function Invoke-ResourceGateResultProbe {
     return [pscustomobject]@{ Value = $value; Code = $code }
 }
 
+function Invoke-ResourceGateWarningSuppressionProbe {
+    param([Parameter(Mandatory)][string]$FixturePath)
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = [IO.Path]::GetFullPath([IO.Path]::Combine($PSHOME, 'pwsh.exe'))
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.ArgumentList.Add('-NoProfile')
+    $startInfo.ArgumentList.Add('-NonInteractive')
+    $startInfo.ArgumentList.Add('-File')
+    $startInfo.ArgumentList.Add($FixturePath)
+    $startInfo.ArgumentList.Add('-WarningAction')
+    $startInfo.ArgumentList.Add('SilentlyContinue')
+    $process = [Diagnostics.Process]::Start($startInfo)
+    try {
+        $standardOutput = $process.StandardOutput.ReadToEnd()
+        $standardError = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            StandardOutput = $standardOutput
+            StandardError = $standardError
+        }
+    }
+    finally { $process.Dispose() }
+}
+
 try {
     $runtimeModule = Import-Module -Name $modulePath -Force -PassThru
     $attributableRoot = Get-ThriveLensAttributableRoot
@@ -177,6 +205,18 @@ try {
     }
 
     $validResourceResultJson = '{"cap_gb":18,"accounted_bytes":123,"accounted_gb":1,"remaining_gb":17,"used_percent":1,"warning_percent":80,"hard_stop_percent":90,"file_count":2,"roots":[],"missing_inactive_roots":[],"nested_roots_already_covered":[],"status":"OK","phase":"bootstrap_active","host_free_memory_gb":1}'
+    $warningFixturePath = Join-Path $fixtureRoot 'resource-gate-warning-fixture.ps1'
+    $warningFixtureSource = "[CmdletBinding()]`r`nparam()`r`nWrite-Warning 'synthetic resource scan warning'`r`n[Console]::Out.Write('$validResourceResultJson')`r`n"
+    [IO.File]::WriteAllText($warningFixturePath, $warningFixtureSource, [Text.UTF8Encoding]::new($false, $true))
+    $warningSuppressionProbe = Invoke-ResourceGateWarningSuppressionProbe -FixturePath $warningFixturePath
+    $warningSuppressionResult = Invoke-ResourceGateResultProbe -Json $warningSuppressionProbe.StandardOutput
+    Assert-Condition (
+        $warningSuppressionProbe.ExitCode -eq 0 -and
+        [string]::IsNullOrEmpty($warningSuppressionProbe.StandardError) -and
+        $null -eq $warningSuppressionResult.Code -and
+        $warningSuppressionResult.Value.AccountedBytes -eq 123 -and
+        $warningSuppressionResult.Value.Status -ceq 'OK'
+    ) 'RESOURCE_GATE_WARNING_SUPPRESSION_PRESERVES_STRICT_JSON_SUBPROCESS'
     $validResourceResult = Invoke-ResourceGateResultProbe -Json $validResourceResultJson
     Assert-Condition (
         $null -eq $validResourceResult.Code -and

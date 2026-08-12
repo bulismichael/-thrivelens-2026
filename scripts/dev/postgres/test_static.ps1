@@ -37,6 +37,26 @@ function Test-ThriveLensRuntimeResourceRunnerDisposalContract {
     )
 }
 
+function Test-ThriveLensRuntimeResourceRunnerArgumentContract {
+    param([Parameter(Mandatory)][string]$Source)
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($Source, [ref]$tokens, [ref]$errors)
+    if (@($errors).Count -ne 0) { return $false }
+    $functions = @($ast.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-ThriveLensResourceGate'
+    }, $true))
+    if ($functions.Count -ne 1) { return $false }
+    $body = $functions[0].Extent.Text
+    return (
+        ([regex]::Matches($body, '\$startInfo\.ArgumentList\.Add\(')).Count -eq 6 -and
+        $body -match "ArgumentList\.Add\('-NoProfile'\)[\s\S]+ArgumentList\.Add\('-NonInteractive'\)[\s\S]+ArgumentList\.Add\('-File'\)[\s\S]+ArgumentList\.Add\(\`$scriptPath\)[\s\S]+ArgumentList\.Add\('-WarningAction'\)[\s\S]+ArgumentList\.Add\('SilentlyContinue'\)" -and
+        $body -notmatch "ArgumentList\.Add\('-Command'\)"
+    )
+}
+
 function Replace-ThriveLensStaticSourceOnce {
     param([string]$Source, [string]$Old, [string]$New)
     $offset = $Source.IndexOf($Old, [StringComparison]::Ordinal)
@@ -226,8 +246,23 @@ try {
         $resourceGateBody -match '\$startInfo\.UseShellExecute\s*=\s*\$false' -and
         $resourceGateBody -match '\$startInfo\.CreateNoWindow\s*=\s*\$true' -and
         $resourceGateBody -notmatch '(?i)cmd(?:\.exe)?|UseShellExecute\s*=\s*\$true') 'RESOURCE_GATE_ABSOLUTE_NO_SHELL_RUNNER'
-    Assert-Condition ($resourceGateBody -match "ArgumentList\.Add\('-NoProfile'\)[\s\S]+ArgumentList\.Add\('-NonInteractive'\)[\s\S]+ArgumentList\.Add\('-File'\)[\s\S]+ArgumentList\.Add\(\`$scriptPath\)" -and
-        $resourceGateBody -notmatch "ArgumentList\.Add\('-Command'\)") 'RESOURCE_GATE_EXACT_ARGUMENT_VECTOR'
+    Assert-Condition (Test-ThriveLensRuntimeResourceRunnerArgumentContract -Source $runtimeModule) 'RESOURCE_GATE_EXACT_ARGUMENT_VECTOR'
+    $runtimeArgumentMutations = @(
+        [pscustomobject]@{ Code = 'MUTATION_KILLS_RESOURCE_GATE_WARNING_ACTION_REMOVAL'; Old = "`$startInfo.ArgumentList.Add('-WarningAction')"; New = "`$null = 'warning action removed'" },
+        [pscustomobject]@{ Code = 'MUTATION_KILLS_RESOURCE_GATE_WARNING_VALUE_RELAXATION'; Old = "`$startInfo.ArgumentList.Add('SilentlyContinue')"; New = "`$startInfo.ArgumentList.Add('Continue')" },
+        [pscustomobject]@{ Code = 'MUTATION_KILLS_RESOURCE_GATE_WARNING_ARGUMENT_ORDER'; Old = "`$startInfo.ArgumentList.Add('-WarningAction')"; New = "`$startInfo.ArgumentList.Add('SilentlyContinue')" }
+    )
+    foreach ($mutation in $runtimeArgumentMutations) {
+        $mutant = Replace-ThriveLensStaticSourceOnce -Source $runtimeModule -Old $mutation.Old -New $mutation.New
+        $mutantTokens = $null
+        $mutantErrors = $null
+        $null = [Management.Automation.Language.Parser]::ParseInput($mutant, [ref]$mutantTokens, [ref]$mutantErrors)
+        Assert-Condition (
+            $mutant -cne $runtimeModule -and
+            @($mutantErrors).Count -eq 0 -and
+            -not (Test-ThriveLensRuntimeResourceRunnerArgumentContract -Source $mutant)
+        ) $mutation.Code
+    }
     Assert-Condition ($runtimeModule -match 'ResourceGateOutputBudgetV2[\s\S]+ContractVersion\s*=\s*"TL_RESOURCE_GATE_CAPTURE_V2"' -and
         $runtimeModule -match 'ResourceGateCaptureStreamV2[\s\S]+ContractVersion\s*=\s*"TL_RESOURCE_GATE_CAPTURE_V2"' -and
         $runtimeModule -match '\$resourceGateCaptureProbeBudget\s*=\s*\[ThriveLens\.ResourceGateOutputBudgetV2\]::new\(4\)' -and

@@ -1143,6 +1143,8 @@ function Invoke-ThriveLensResourceGate {
         $startInfo.ArgumentList.Add('-NonInteractive')
         $startInfo.ArgumentList.Add('-File')
         $startInfo.ArgumentList.Add($scriptPath)
+        $startInfo.ArgumentList.Add('-WarningAction')
+        $startInfo.ArgumentList.Add('SilentlyContinue')
         $process.StartInfo = $startInfo
         try {
             if (-not $process.Start()) { throw 'RESOURCE_GATE_PROCESS_START_FAILED' }
