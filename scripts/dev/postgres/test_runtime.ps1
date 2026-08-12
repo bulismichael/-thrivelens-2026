@@ -17,10 +17,8 @@ function Remove-ThriveLensRuntimeCredential {
         throw 'AUTH_FILE_PATH_INVALID'
     }
 
-    $removeResult = $null
-    $absenceResult = $null
-    $removeSucceeded = $false
-    $absenceVerified = $false
+    $removeResult=$null;$absenceResult=$null;$rootFailureCode=$null
+    $removeSucceeded=$false;$absenceVerified=$false;$allowAbsenceProbe=$true
     try {
         try {
             $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
@@ -28,24 +26,29 @@ function Remove-ThriveLensRuntimeCredential {
             $removeSucceeded = $removeResult.ExitCode -eq 0
         }
         catch {
-            $removeCode=if($_.Exception.Message -match '^[A-Z0-9_]+$'){$_.Exception.Message}else{'AUTH_FILE_CLEANUP_FAILED'}
-            throw $removeCode
+            $removeRawCode=[string]$_.Exception.Message
+            $rootFailureCode=Resolve-ThriveLensRuntimePublicCode -Code $removeRawCode
+            # Only bounded supervisor failures whose guarded wrapper already
+            # re-established same-token containment may be followed by a fresh
+            # read-only absence probe. Identity/lock/unknown failures authorize
+            # no further guest command.
+            $allowAbsenceProbe=Test-ThriveLensCredentialAbsenceProbeAllowed -FailureCode $removeRawCode
         }
 
-        # Absence is measured even when rm fails or its bounded invocation throws.
-        try {
-            $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
-            $absenceResult = Invoke-ThriveLensGuardedDistro -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock -Arguments @('/usr/bin/test', '!', '-e', $Path)
-            $absenceVerified = $absenceResult.ExitCode -eq 0
+        if($allowAbsenceProbe){
+            try {
+                $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
+                $absenceResult = Invoke-ThriveLensGuardedDistro -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock -Arguments @('/usr/bin/test', '!', '-e', $Path)
+                $absenceVerified = $absenceResult.ExitCode -eq 0
+            }
+            catch {
+                $absenceVerified=$false
+                if($null -eq $rootFailureCode){$rootFailureCode=Resolve-ThriveLensRuntimePublicCode -Code ([string]$_.Exception.Message)}
+            }
         }
-        catch {
-            $absenceCode=if($_.Exception.Message -match '^[A-Z0-9_]+$'){$_.Exception.Message}else{'AUTH_FILE_CLEANUP_FAILED'}
-            throw $absenceCode
-        }
-
-        if (-not $removeSucceeded -or -not $absenceVerified) {
-            throw 'AUTH_FILE_CLEANUP_FAILED'
-        }
+        if(-not $removeSucceeded -and $null -eq $rootFailureCode){$rootFailureCode='AUTH_FILE_CLEANUP_REMOVE_FAILED'}
+        if((-not $allowAbsenceProbe -or -not $absenceVerified) -and $null -eq $rootFailureCode){$rootFailureCode='AUTH_FILE_CLEANUP_ABSENCE_UNVERIFIED'}
+        return Resolve-ThriveLensCredentialCleanupResult -RemoveSucceeded $removeSucceeded -AbsenceAttempted $allowAbsenceProbe -AbsenceVerified $absenceVerified -RootFailureCode $rootFailureCode
     }
     finally {
         $removeResult = $null
@@ -90,6 +93,10 @@ function Assert-ThriveLensAuthenticatedScalar {
 $started = $false
 $failureExitCode = 2
 $credentialCleanupFatal = $false
+$credentialCleanupRequired = $false
+$credentialRemoveFailed = $false
+$credentialRootFailureCode = $null
+$credentialAbsenceVerified = $true
 $bootstrapSecret = $null
 $wrongSecret = $null
 $correctAuthFile = $null
@@ -100,6 +107,7 @@ $wrongOutcome = $null
 $probeLifecycleLock = $null
 $probeIdentityToken = $null
 $probeIdentityEverEstablished = $false
+$cleanupAuthorityVerified = $true
 $distroAbsenceVerified = $false
 $hostAbsenceVerified = $false
 
@@ -147,6 +155,7 @@ try {
         $distroAbsenceVerified = $false
         $hostAbsenceVerified = $false
         $probeIdentityEverEstablished = $false
+        $cleanupAuthorityVerified = $true
         $startExitCode = 3
         $started=$true;$start=@(& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'start.ps1') 2>&1)
         $startExitCode = $LASTEXITCODE
@@ -178,9 +187,11 @@ try {
         # identity, encoding and Base64Url value on every cycle.
         $correctAuthFile = '/run/thrivelens-r0-auth-' + [guid]::NewGuid().ToString('N') + '.pgpass'
         $correctCreate = $null
+        $correctOperationFailure=$null
         try {
             $bootstrapSecret = Read-ThriveLensPostgresBootstrapSecret -Path $actual
             $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+            $credentialCleanupRequired=$true
             $correctCreate = Invoke-ThriveLensGuardedDistro -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock `
                 -StandardInput ("127.0.0.1:55432:postgres:tl_bootstrap:$bootstrapSecret`n") `
                 -Arguments @(
@@ -227,11 +238,13 @@ try {
             $wrongAuthFile = '/run/thrivelens-r0-wrong-' + [guid]::NewGuid().ToString('N') + '.pgpass'
             $wrongCreate = $null
             $wrongProbe = $null
+            $wrongOperationFailure=$null
             $wrongExitCode = -1
             $wrongStandardOutput = $null
             $wrongPrivateError = $null
             try {
                 $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+                $credentialCleanupRequired=$true
                 $wrongCreate = Invoke-ThriveLensGuardedDistro -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock `
                     -StandardInput ("127.0.0.1:55432:postgres:tl_bootstrap:$wrongSecret`n") `
                     -Arguments @(
@@ -256,19 +269,34 @@ try {
                 $wrongStandardOutput=[string]$wrongProbe.PrivateStandardOutput
                 $wrongPrivateError=[string]$wrongProbe.PrivateStandardError
             }
+            catch{$wrongOperationFailure=[string]$_.Exception.Message;throw}
             finally {
                 $wrongSecret = $null
                 $wrongCreate = $null
                 $wrongProbe = $null
-                try {
-                    Remove-ThriveLensRuntimeCredential -Path $wrongAuthFile -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+                if($null -ne $wrongOperationFailure -and -not (Test-ThriveLensCredentialCleanupAllowedAfterFailure -FailureCode $wrongOperationFailure)){
+                    $credentialCleanupFatal=$true;$credentialAbsenceVerified=$false
+                }
+                else{try {
+                    $previousCredentialAbsence=$credentialAbsenceVerified
+                    $credentialAbsenceVerified=$false
+                    $credentialResult=Remove-ThriveLensRuntimeCredential -Path $wrongAuthFile -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+                    if($null -eq $credentialRootFailureCode -and $null -ne $credentialResult.RootFailureCode){$credentialRootFailureCode=[string]$credentialResult.RootFailureCode}
+                    $credentialRemoveFailed=$credentialRemoveFailed -or -not [bool]$credentialResult.RemoveSucceeded
+                    $credentialAbsenceVerified=$previousCredentialAbsence -and [bool]$credentialResult.CredentialAbsenceVerified
+                    if($null -ne $credentialResult.FailureCode){
+                        $credentialCleanupFatal=$true
+                        $credentialCode=Resolve-ThriveLensCredentialFailureCode -PrimaryOperationCode $wrongOperationFailure -RootFailureCode $credentialResult.RootFailureCode -CleanupCode $credentialResult.FailureCode
+                        if($null -eq $wrongOperationFailure){throw $credentialCode}
+                    }
                 }
                 catch {
                     $credentialCleanupFatal = $true
-                    $credentialCode=if($_.Exception.Message -match '^[A-Z0-9_]+$'){$_.Exception.Message}else{'AUTH_FILE_CLEANUP_FAILED'}
-                    throw $credentialCode
-                }
-                finally { $wrongAuthFile = $null }
+                    $credentialCode=Resolve-ThriveLensRuntimePublicCode -Code ([string]$_.Exception.Message)
+                    if($credentialCode -ceq 'AUTH_FILE_CLEANUP_REMOVE_FAILED'){$credentialRemoveFailed=$true}
+                    if($null -eq $wrongOperationFailure){throw $credentialCode}
+                }}
+                $wrongAuthFile = $null
             }
 
             # Prove the same server remains usable through correct SCRAM auth;
@@ -290,20 +318,35 @@ try {
             if($wrongOutcome.Status -cne 'AUTHENTICATION_REJECTED'){throw 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE'}
             $wrongOutcome=$null;$wrongStandardOutput=$null;$wrongPrivateError=$null
         }
+        catch{$correctOperationFailure=[string]$_.Exception.Message;throw}
         finally {
             $bootstrapSecret = $null
             $correctCreate = $null
             $wrongStandardOutput = $null
             $wrongPrivateError = $null
-            try {
-                Remove-ThriveLensRuntimeCredential -Path $correctAuthFile -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+            if($null -ne $correctOperationFailure -and -not (Test-ThriveLensCredentialCleanupAllowedAfterFailure -FailureCode $correctOperationFailure)){
+                $credentialCleanupFatal=$true;$credentialAbsenceVerified=$false
+            }
+            else{try {
+                $previousCredentialAbsence=$credentialAbsenceVerified
+                $credentialAbsenceVerified=$false
+                $credentialResult=Remove-ThriveLensRuntimeCredential -Path $correctAuthFile -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+                if($null -eq $credentialRootFailureCode -and $null -ne $credentialResult.RootFailureCode){$credentialRootFailureCode=[string]$credentialResult.RootFailureCode}
+                $credentialRemoveFailed=$credentialRemoveFailed -or -not [bool]$credentialResult.RemoveSucceeded
+                $credentialAbsenceVerified=$previousCredentialAbsence -and [bool]$credentialResult.CredentialAbsenceVerified
+                if($null -ne $credentialResult.FailureCode){
+                    $credentialCleanupFatal=$true
+                    $credentialCode=Resolve-ThriveLensCredentialFailureCode -PrimaryOperationCode $correctOperationFailure -RootFailureCode $credentialResult.RootFailureCode -CleanupCode $credentialResult.FailureCode
+                    if($null -eq $correctOperationFailure){throw $credentialCode}
+                }
             }
             catch {
                 $credentialCleanupFatal = $true
-                $credentialCode=if($_.Exception.Message -match '^[A-Z0-9_]+$'){$_.Exception.Message}else{'AUTH_FILE_CLEANUP_FAILED'}
-                throw $credentialCode
-            }
-            finally { $correctAuthFile = $null }
+                $credentialCode=Resolve-ThriveLensRuntimePublicCode -Code ([string]$_.Exception.Message)
+                if($credentialCode -ceq 'AUTH_FILE_CLEANUP_REMOVE_FAILED'){$credentialRemoveFailed=$true}
+                if($null -eq $correctOperationFailure){throw $credentialCode}
+            }}
+            $correctAuthFile = $null
         }
 
         # A negative authentication result is accepted only while the same
@@ -345,39 +388,75 @@ try {
     } | ConvertTo-Json -Compress
 }
 catch {
-    $rawCode = $_.Exception.Message
-    $code = if ($rawCode -match '^[A-Z0-9_]+$') { $rawCode } else { 'RUNTIME_TEST_INTERNAL_ERROR' }
+    $originalCode=Resolve-ThriveLensRuntimePublicCode -Code ([string]$_.Exception.Message)
+    $fatalOriginalCodes=@(
+        'RUNTIME_TEST_INTERNAL_ERROR','RUNTIME_START_CHILD_FATAL','RUNTIME_START_CHILD_UNEXPECTED_EXIT',
+        'RUNTIME_START_ABSENCE_UNVERIFIED','AUTH_FILE_CLEANUP_REMOVE_FAILED',
+        'AUTH_FILE_CLEANUP_ABSENCE_UNVERIFIED','WSL_GUARDED_COMMAND_CONTAINMENT_FAILED',
+        'WSL_CLEANUP_IDENTITY_CHANGED','LIFECYCLE_LOCK_TIMEOUT','LIFECYCLE_LOCK_OWNERSHIP_REQUIRED'
+    )
+    $originalExitCode=if($failureExitCode -eq 3 -or $credentialCleanupFatal -or $fatalOriginalCodes -ccontains $originalCode){3}else{2}
     $cleanupRequired = $started
-    $cleanupInvocationFailed = $false
     $cleanupIdentityChanged=$false
+    $postgresStopFailed=$false;$distroTerminateFailed=$false
+    $distroAbsenceCheckFailed=$false;$hostAbsenceCheckFailed=$false;$lockReleaseFailed=$false
 
     # Once a cycle has captured an identity token, cleanup stays under that
     # same mutex/token authority. Never release it and mint fresh authority for
     # a same-name replacement. Graceful and forced cleanup remain independent.
     if($started -and $probeIdentityEverEstablished){
         if($null -eq $probeLifecycleLock -or $null -eq $probeIdentityToken){
-            $cleanupIdentityChanged=$true;$cleanupInvocationFailed=$true;$failureExitCode=3
+            $cleanupIdentityChanged=$true
         }
         else{
-            $sameTokenCleanupFailed=$false
             try{$null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock}
-            catch{$sameTokenCleanupFailed=$true;$cleanupIdentityChanged=$true}
-            if(-not $sameTokenCleanupFailed){
-                try{$null=Stop-ThriveLensPostgresUnderLock -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock}catch{$sameTokenCleanupFailed=$true}
-                try{Stop-ThriveLensDistroAndVerify -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock}catch{$sameTokenCleanupFailed=$true}
-                try{Assert-ThriveLensDistroStopped;$distroAbsenceVerified=$true}catch{$distroAbsenceVerified=$false;$sameTokenCleanupFailed=$true}
-                try{Assert-ThriveLensHostPortAbsent;$hostAbsenceVerified=$true}catch{$hostAbsenceVerified=$false;$sameTokenCleanupFailed=$true}
+            catch{$cleanupIdentityChanged=$true}
+            if(-not $cleanupIdentityChanged -and -not $credentialCleanupFatal -and $originalCode -cne 'WSL_GUARDED_COMMAND_CONTAINMENT_FAILED'){
+                try{$null=Stop-ThriveLensPostgresUnderLock -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock}
+                catch{
+                    $postgresStopFailed=$true
+                    if(-not (Test-ThriveLensCleanupFailurePreservesIdentityAuthority -Stage 'POSTGRES_STOP' -FailureCode ([string]$_.Exception.Message))){$cleanupIdentityChanged=$true}
+                }
+                if(-not $cleanupIdentityChanged){
+                    try{Stop-ThriveLensDistroAndVerify -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock}
+                    catch{
+                        $cleanupFailure=Resolve-ThriveLensDistroCleanupFailure -FailureCode ([string]$_.Exception.Message)
+                        switch([string]$cleanupFailure.Stage){
+                            'DISTRO_TERMINATE' {$distroTerminateFailed=$true}
+                            'DISTRO_ABSENCE' {$distroAbsenceCheckFailed=$true}
+                            'HOST_ABSENCE' {$hostAbsenceCheckFailed=$true}
+                        }
+                        if(-not $cleanupFailure.IdentityAuthorityPreserved){$cleanupIdentityChanged=$true}
+                    }
+                }
             }
-            if($sameTokenCleanupFailed){$cleanupInvocationFailed=$true;$failureExitCode=3}
-            elseif($distroAbsenceVerified -and $hostAbsenceVerified){$started=$false}
+            elseif(-not $cleanupIdentityChanged){
+                # Credential uncertainty or guest-command containment failure
+                # authorizes only exact token-gated distro termination. Do not
+                # issue pg_ctl or any additional guest command first.
+                try{Stop-ThriveLensDistroAndVerify -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock}
+                catch{
+                    $cleanupFailure=Resolve-ThriveLensDistroCleanupFailure -FailureCode ([string]$_.Exception.Message)
+                    switch([string]$cleanupFailure.Stage){
+                        'DISTRO_TERMINATE' {$distroTerminateFailed=$true}
+                        'DISTRO_ABSENCE' {$distroAbsenceCheckFailed=$true}
+                        'HOST_ABSENCE' {$hostAbsenceCheckFailed=$true}
+                    }
+                    if(-not $cleanupFailure.IdentityAuthorityPreserved){$cleanupIdentityChanged=$true}
+                }
+            }
+            if(-not $cleanupIdentityChanged){
+                try{Assert-ThriveLensDistroStopped;$distroAbsenceVerified=$true}catch{$distroAbsenceVerified=$false}
+                try{Assert-ThriveLensHostPortAbsent;$hostAbsenceVerified=$true}catch{$hostAbsenceVerified=$false}
+            }
+            if($distroAbsenceVerified -and $hostAbsenceVerified){$started=$false}
         }
-        try{Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock}catch{$cleanupInvocationFailed=$true;$failureExitCode=3}
+        try{Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock}catch{$lockReleaseFailed=$true}
         $probeLifecycleLock=$null;$probeIdentityToken=$null
-        if($cleanupInvocationFailed){$code=if($cleanupIdentityChanged){'RUNTIME_CLEANUP_IDENTITY_CHANGED'}else{'RUNTIME_CLEANUP_FAILED'}}
     }
     elseif($null -ne $probeLifecycleLock){
         # A lock without a completed token carries no mutation authority.
-        try{Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock}catch{$cleanupInvocationFailed=$true;$failureExitCode=3}
+        try{Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock}catch{$lockReleaseFailed=$true}
         $probeLifecycleLock=$null;$probeIdentityToken=$null
     }
 
@@ -388,26 +467,43 @@ catch {
         try{Assert-ThriveLensDistroStopped;$distroAbsenceVerified=$true}catch{$distroAbsenceVerified=$false}
         try{Assert-ThriveLensHostPortAbsent;$hostAbsenceVerified=$true}catch{$hostAbsenceVerified=$false}
         $observation=Resolve-ThriveLensPreTokenStartObservation -StartExitCode $startExitCode -DistroAbsent $distroAbsenceVerified -HostPortAbsent $hostAbsenceVerified
-        $code=[string]$observation.Code
-        $failureExitCode=[int]$observation.ExitCode
+        $originalCode=Resolve-ThriveLensRuntimePublicCode -Code ([string]$observation.Code)
+        $originalExitCode=[int]$observation.ExitCode
+        $cleanupAuthorityVerified=[bool]$observation.CleanupVerified
         if($observation.CleanupVerified){$started=$false}
-        else{$cleanupInvocationFailed=$true}
     }
 
     $bootstrapSecret = $null
     $wrongSecret = $null
-    $fatal = $credentialCleanupFatal -or $failureExitCode -eq 3
+    $outcome=Resolve-ThriveLensRuntimeCleanupOutcome `
+        -OriginalCode $originalCode -OriginalExitCode $originalExitCode `
+        -CleanupRequired $cleanupRequired `
+        -CleanupAuthorityVerified $cleanupAuthorityVerified `
+        -CredentialCleanupRequired $credentialCleanupRequired `
+        -CredentialRemoveFailed $credentialRemoveFailed `
+        -CredentialRootFailureCode $credentialRootFailureCode `
+        -CredentialAbsenceVerified $credentialAbsenceVerified `
+        -IdentityChanged $cleanupIdentityChanged `
+        -PostgresStopFailed $postgresStopFailed `
+        -DistroTerminateFailed $distroTerminateFailed `
+        -DistroAbsenceCheckFailed $distroAbsenceCheckFailed `
+        -HostAbsenceCheckFailed $hostAbsenceCheckFailed `
+        -DistroAbsent $distroAbsenceVerified -HostAbsent $hostAbsenceVerified `
+        -LockReleaseFailed $lockReleaseFailed
     [pscustomobject]@{
-        schema_version = 1
-        status = if ($fatal) { 'ERROR' } else { 'BLOCKED' }
-        code = $code
+        schema_version = 2
+        status = [string]$outcome.Status
+        code = [string]$outcome.Code
+        original_code = [string]$outcome.OriginalCode
+        failure_stages = @($outcome.FailureStages)
         cleanup_required = $cleanupRequired
-        cleanup_verified = (-not $started -and -not $credentialCleanupFatal -and $distroAbsenceVerified -and $hostAbsenceVerified)
+        cleanup_verified = [bool]$outcome.CleanupVerified
+        credential_cleanup_required = $credentialCleanupRequired
+        credential_absence_verified = $credentialAbsenceVerified
         distro_absence_verified = $distroAbsenceVerified
         host_absence_verified = $hostAbsenceVerified
     } | ConvertTo-Json -Compress
-    if ($fatal) { exit 3 }
-    exit 2
+    exit ([int]$outcome.ExitCode)
 }
 finally {
     # Clear every variable that may have held credential material on all exits.

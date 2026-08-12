@@ -102,7 +102,7 @@ try {
     $runtimeStopChildInvocation = "& pwsh -NoProfile -File (Join-Path `$PSScriptRoot 'stop.ps1')"
     Assert-Condition ($runtimeTest -match 'Resolve-ThriveLensPreTokenStartObservation' -and $runtimeTest.IndexOf($runtimeStopChildInvocation,[StringComparison]::Ordinal) -lt 0) 'TEST_PRETOKEN_START_READ_ONLY_OBSERVATION'
     Assert-Condition ($runtimeTest -match 'RUNTIME_START_PROBE_FAILED') 'TEST_CHILD_FAILURE_CLASSIFIER'
-    Assert-Condition ($runtimeTest -match 'RUNTIME_CLEANUP_FAILED') 'TEST_CLEANUP_OUTCOME_CLASSIFIER'
+    Assert-Condition ($runtimeTest -match 'Resolve-ThriveLensRuntimeCleanupOutcome' -and $wslModule -match 'RUNTIME_CLEANUP_FAILED') 'TEST_CLEANUP_OUTCOME_CLASSIFIER'
     Assert-Condition ($start -match 'POSTGRES_START_CLEANUP_FAILED') 'TEST_PRESERVES_START_FATAL'
     Assert-Condition ($securityTest.IndexOf('finally {') -lt $securityTest.LastIndexOf('$preliminaryResponse | ConvertTo-Json')) 'SECURITY_PASS_AFTER_CLEANUP'
     Assert-Condition ($securityTest -match 'SECURITY_FIXTURE_CLEANUP_FAILED') 'SECURITY_CLEANUP_FAILURE_FATAL'

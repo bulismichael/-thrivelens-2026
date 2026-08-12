@@ -820,8 +820,180 @@ function Stop-ThriveLensPostgresUnderLock {
         Assert-ThriveLensWslAbsent
     }
     Assert-ThriveLensWslAbsent
-    Assert-ThriveLensHostPortAbsent
     return $wasRunning
+}
+
+function Resolve-ThriveLensRuntimePublicCode {
+    param([AllowEmptyString()][string]$Code)
+    $allowed=@(
+        'AUTH_FILE_PATH_INVALID','AUTH_FILE_CREATE_FAILED','WRONG_AUTH_FILE_CREATE_FAILED',
+        'AUTH_FILE_CLEANUP_REMOVE_FAILED','AUTH_FILE_CLEANUP_ABSENCE_UNVERIFIED',
+        'PASSWORD_FILE_PATH_INVALID','PASSWORD_FILE_PATH_MISMATCH',
+        'RUNTIME_START_PROBE_FAILED','RUNTIME_START_CHILD_FATAL','RUNTIME_START_CHILD_UNEXPECTED_EXIT',
+        'RUNTIME_START_ABSENCE_UNVERIFIED','RUNTIME_POSTGRES_NOT_RUNNING_AT_STOP',
+        'SCRAM_AUTH_PROBE_FAILED','PASSWORD_ENCRYPTION_PROBE_FAILED','HBA_SCRAM_PROBE_FAILED',
+        'SCRAM_VERIFIER_PROBE_FAILED','WRONG_PASSWORD_FIXTURE_INVALID','WRONG_PASSWORD_WAS_ACCEPTED',
+        'WRONG_PASSWORD_PROBE_UNEXPECTED_OUTPUT','WRONG_PASSWORD_PROBE_UNRELATED_FAILURE',
+        'WRONG_PASSWORD_SERVER_USABILITY_UNVERIFIED','POSTGRES_STOP_FAILED',
+        'POSTGRES_CLUSTER_STILL_RUNNING','POSTGRES_LISTENER_STILL_PRESENT','POSTGRES_PROCESS_STILL_PRESENT',
+        'WSL_GUARDED_COMMAND_CONTAINMENT_FAILED','WSL_CLEANUP_IDENTITY_CHANGED',
+        'LIFECYCLE_LOCK_TIMEOUT','LIFECYCLE_LOCK_OWNERSHIP_REQUIRED',
+        'HOST_LISTENER_MEASUREMENT_UNAVAILABLE','HOST_PORTPROXY_MEASUREMENT_UNAVAILABLE',
+        'HOST_POSTGRES_LISTENER_STILL_PRESENT','HOST_PORTPROXY_STILL_PRESENT',
+        'WSL_DISTRO_TERMINATE_FAILED','WSL_RUNNING_STATE_UNAVAILABLE','WSL_DISTRO_STILL_RUNNING','RESOURCE_GATE_FAILED',
+        'RUNTIME_CLEANUP_FAILED','RUNTIME_CLEANUP_IDENTITY_CHANGED','RUNTIME_LOCK_RELEASE_FAILED',
+        'WSL_COMMAND_TIMEOUT','WSL_OUTPUT_LIMIT_EXCEEDED','WSL_OUTPUT_DRAIN_INCOMPLETE',
+        'WSL_PROCESS_START_FAILED','RUNTIME_TEST_INTERNAL_ERROR'
+    )
+    if($allowed -ccontains $Code){return $Code}
+    return 'RUNTIME_TEST_INTERNAL_ERROR'
+}
+
+function Test-ThriveLensCredentialAbsenceProbeAllowed {
+    param([AllowEmptyString()][string]$FailureCode)
+    return @(
+        'WSL_COMMAND_TIMEOUT','WSL_OUTPUT_LIMIT_EXCEEDED',
+        'WSL_OUTPUT_DRAIN_INCOMPLETE','WSL_PROCESS_START_FAILED'
+    ) -ccontains $FailureCode
+}
+
+function Test-ThriveLensCredentialCleanupAllowedAfterFailure {
+    param([AllowEmptyString()][string]$FailureCode)
+    $public=Resolve-ThriveLensRuntimePublicCode -Code $FailureCode
+    if($public -ceq 'RUNTIME_TEST_INTERNAL_ERROR'){return $false}
+    return $public -cnotin @(
+        'WSL_GUARDED_COMMAND_CONTAINMENT_FAILED','WSL_CLEANUP_IDENTITY_CHANGED',
+        'LIFECYCLE_LOCK_TIMEOUT','LIFECYCLE_LOCK_OWNERSHIP_REQUIRED',
+        'AUTH_FILE_CLEANUP_REMOVE_FAILED','AUTH_FILE_CLEANUP_ABSENCE_UNVERIFIED'
+    )
+}
+
+function Test-ThriveLensCleanupFailurePreservesIdentityAuthority {
+    param(
+        [Parameter(Mandatory)][ValidateSet('POSTGRES_STOP','DISTRO_TERMINATE','DISTRO_ABSENCE','HOST_ABSENCE')][string]$Stage,
+        [AllowEmptyString()][string]$FailureCode
+    )
+    $common=@('WSL_COMMAND_TIMEOUT','WSL_OUTPUT_LIMIT_EXCEEDED','WSL_OUTPUT_DRAIN_INCOMPLETE','WSL_PROCESS_START_FAILED')
+    $allowed=switch($Stage){
+        'POSTGRES_STOP' {$common+@('POSTGRES_STOP_FAILED','POSTGRES_CLUSTER_STILL_RUNNING','POSTGRES_LISTENER_STILL_PRESENT','POSTGRES_PROCESS_STILL_PRESENT');break}
+        'DISTRO_TERMINATE' {$common+@('WSL_DISTRO_TERMINATE_FAILED');break}
+        'DISTRO_ABSENCE' {$common+@('WSL_RUNNING_STATE_UNAVAILABLE','WSL_DISTRO_STILL_RUNNING');break}
+        'HOST_ABSENCE' {@('HOST_LISTENER_MEASUREMENT_UNAVAILABLE','HOST_POSTGRES_LISTENER_STILL_PRESENT','HOST_PORTPROXY_MEASUREMENT_UNAVAILABLE','HOST_PORTPROXY_STILL_PRESENT');break}
+    }
+    return $allowed -ccontains $FailureCode
+}
+
+function Resolve-ThriveLensDistroCleanupFailure {
+    param([AllowEmptyString()][string]$FailureCode)
+    $publicCode=Resolve-ThriveLensRuntimePublicCode -Code $FailureCode
+    $stage=Resolve-ThriveLensRuntimeFailureStage -Code $publicCode
+    $boundedStage=$stage -cin @('DISTRO_TERMINATE','DISTRO_ABSENCE','HOST_ABSENCE')
+    $preserves=$boundedStage -and (Test-ThriveLensCleanupFailurePreservesIdentityAuthority -Stage $stage -FailureCode $publicCode)
+    return [pscustomobject]@{
+        Code=$publicCode
+        Stage=$stage
+        IdentityAuthorityPreserved=$preserves
+    }
+}
+
+function Resolve-ThriveLensCredentialCleanupResult {
+    param(
+        [Parameter(Mandatory)][bool]$RemoveSucceeded,
+        [Parameter(Mandatory)][bool]$AbsenceAttempted,
+        [Parameter(Mandatory)][bool]$AbsenceVerified,
+        [AllowNull()][string]$RootFailureCode
+    )
+    $stages=[Collections.Generic.List[string]]::new()
+    if(-not $RemoveSucceeded){$stages.Add('CREDENTIAL_REMOVE')}
+    if(-not $AbsenceAttempted -or -not $AbsenceVerified){$stages.Add('CREDENTIAL_ABSENCE')}
+    $code=if(-not $AbsenceAttempted -or -not $AbsenceVerified){'AUTH_FILE_CLEANUP_ABSENCE_UNVERIFIED'}elseif(-not $RemoveSucceeded){'AUTH_FILE_CLEANUP_REMOVE_FAILED'}else{$null}
+    $sanitizedRoot=if([string]::IsNullOrWhiteSpace($RootFailureCode)){$null}else{Resolve-ThriveLensRuntimePublicCode -Code $RootFailureCode}
+    return [pscustomobject]@{RemoveSucceeded=$RemoveSucceeded;CredentialAbsenceVerified=($AbsenceAttempted -and $AbsenceVerified);FailureCode=$code;RootFailureCode=$sanitizedRoot;FailureStages=@($stages)}
+}
+
+function Resolve-ThriveLensCredentialFailureCode {
+    param(
+        [AllowNull()][string]$PrimaryOperationCode,
+        [AllowNull()][string]$RootFailureCode,
+        [AllowNull()][string]$CleanupCode
+    )
+    foreach($candidate in @($PrimaryOperationCode,$RootFailureCode,$CleanupCode)){
+        if(-not [string]::IsNullOrWhiteSpace($candidate)){
+            return Resolve-ThriveLensRuntimePublicCode -Code $candidate
+        }
+    }
+    return $null
+}
+
+function Resolve-ThriveLensRuntimeFailureStage {
+    param([Parameter(Mandatory)][string]$Code)
+    if($Code -like 'AUTH_FILE_CLEANUP_REMOVE*'){return 'CREDENTIAL_REMOVE'}
+    if($Code -like 'AUTH_FILE_CLEANUP_ABSENCE*'){return 'CREDENTIAL_ABSENCE'}
+    if($Code -like 'RUNTIME_START*'){return 'START'}
+    if($Code -match 'IDENTITY|LIFECYCLE_LOCK'){return 'IDENTITY'}
+    if($Code -like 'RESOURCE_*'){return 'RESOURCE_GATE'}
+    if($Code -like 'POSTGRES_STOP*' -or $Code -cin @('RUNTIME_POSTGRES_NOT_RUNNING_AT_STOP','POSTGRES_CLUSTER_STILL_RUNNING','POSTGRES_LISTENER_STILL_PRESENT','POSTGRES_PROCESS_STILL_PRESENT')){return 'POSTGRES_STOP'}
+    if($Code -like 'WSL_DISTRO_TERMINATE*'){return 'DISTRO_TERMINATE'}
+    if($Code -like 'WSL_RUNNING_STATE*' -or $Code -ceq 'WSL_DISTRO_STILL_RUNNING'){return 'DISTRO_ABSENCE'}
+    if($Code -like 'HOST_*'){return 'HOST_ABSENCE'}
+    return 'PROBE'
+}
+
+function Resolve-ThriveLensRuntimeCleanupOutcome {
+    param(
+        [Parameter(Mandatory)][string]$OriginalCode,
+        [Parameter(Mandatory)][ValidateSet(2,3)][int]$OriginalExitCode,
+        [Parameter(Mandatory)][bool]$CleanupRequired,
+        [Parameter(Mandatory)][bool]$CleanupAuthorityVerified,
+        [Parameter(Mandatory)][bool]$CredentialCleanupRequired,
+        [Parameter(Mandatory)][bool]$CredentialRemoveFailed,
+        [AllowNull()][string]$CredentialRootFailureCode,
+        [Parameter(Mandatory)][bool]$CredentialAbsenceVerified,
+        [Parameter(Mandatory)][bool]$IdentityChanged,
+        [Parameter(Mandatory)][bool]$PostgresStopFailed,
+        [Parameter(Mandatory)][bool]$DistroTerminateFailed,
+        [Parameter(Mandatory)][bool]$DistroAbsenceCheckFailed,
+        [Parameter(Mandatory)][bool]$HostAbsenceCheckFailed,
+        [Parameter(Mandatory)][bool]$DistroAbsent,
+        [Parameter(Mandatory)][bool]$HostAbsent,
+        [Parameter(Mandatory)][bool]$LockReleaseFailed
+    )
+    $publicCode=Resolve-ThriveLensRuntimePublicCode -Code $OriginalCode
+    $stages=[Collections.Generic.List[string]]::new()
+    $addStage={param([string]$Stage)if(-not $stages.Contains($Stage)){$stages.Add($Stage)}}
+    & $addStage (Resolve-ThriveLensRuntimeFailureStage -Code $publicCode)
+    if(-not [string]::IsNullOrWhiteSpace($CredentialRootFailureCode)){
+        & $addStage (Resolve-ThriveLensRuntimeFailureStage -Code (Resolve-ThriveLensRuntimePublicCode -Code $CredentialRootFailureCode))
+    }
+    if($CredentialRemoveFailed){& $addStage 'CREDENTIAL_REMOVE'}
+    if($CredentialCleanupRequired -and -not $CredentialAbsenceVerified){& $addStage 'CREDENTIAL_ABSENCE'}
+    if(-not $CleanupAuthorityVerified){& $addStage 'IDENTITY'}
+    if($IdentityChanged){& $addStage 'IDENTITY'}
+    if($PostgresStopFailed){& $addStage 'POSTGRES_STOP'}
+    if($DistroTerminateFailed){& $addStage 'DISTRO_TERMINATE'}
+    if($DistroAbsenceCheckFailed){& $addStage 'DISTRO_ABSENCE'}
+    if($HostAbsenceCheckFailed){& $addStage 'HOST_ABSENCE'}
+    if(-not $DistroAbsent){& $addStage 'DISTRO_ABSENCE'}
+    if(-not $HostAbsent){& $addStage 'HOST_ABSENCE'}
+    if($LockReleaseFailed){& $addStage 'LOCK_RELEASE'}
+    $cleanupVerified=$CleanupAuthorityVerified -and
+        (-not $CleanupRequired -or ($DistroAbsent -and $HostAbsent -and -not $IdentityChanged)) -and
+        (-not $CredentialCleanupRequired -or $CredentialAbsenceVerified)
+    if(-not $cleanupVerified){
+        $finalCode=if($IdentityChanged){'RUNTIME_CLEANUP_IDENTITY_CHANGED'}else{'RUNTIME_CLEANUP_FAILED'}
+        return [pscustomobject]@{Status='ERROR';Code=$finalCode;OriginalCode=$publicCode;ExitCode=3;CleanupVerified=$false;FailureStages=@($stages)}
+    }
+    if($LockReleaseFailed){
+        return [pscustomobject]@{Status='ERROR';Code='RUNTIME_LOCK_RELEASE_FAILED';OriginalCode=$publicCode;ExitCode=3;CleanupVerified=$true;FailureStages=@($stages)}
+    }
+    return [pscustomobject]@{
+        Status=if($OriginalExitCode -eq 3){'ERROR'}else{'BLOCKED'}
+        Code=$publicCode
+        OriginalCode=$publicCode
+        ExitCode=$OriginalExitCode
+        CleanupVerified=$true
+        FailureStages=@($stages)
+    }
 }
 
 function Resolve-ThriveLensChildOutcome {
@@ -894,15 +1066,32 @@ function Stop-ThriveLensDistroAndVerify {
     param([Parameter(Mandatory)]$IdentityToken,[Parameter(Mandatory)][Threading.Mutex]$LifecycleLock)
     $null=Assert-ThriveLensLifecycleLockOwnership -LifecycleLock $LifecycleLock
     $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
+    $terminateFailure=$null
     try{
-        $result=Invoke-ThriveLensWsl -Arguments @('--terminate','ThriveLens-R0') -TimeoutSeconds 15
-        if($result.ExitCode -ne 0){throw 'WSL_DISTRO_TERMINATE_FAILED'}
+        try{
+            $result=Invoke-ThriveLensWsl -Arguments @('--terminate','ThriveLens-R0') -TimeoutSeconds 15
+            if($result.ExitCode -ne 0){$terminateFailure='WSL_DISTRO_TERMINATE_FAILED'}
+        }
+        catch{
+            $publicCode=Resolve-ThriveLensRuntimePublicCode -Code ([string]$_.Exception.Message)
+            $terminateFailure=if($publicCode -cin @('WSL_COMMAND_TIMEOUT','WSL_OUTPUT_LIMIT_EXCEEDED','WSL_OUTPUT_DRAIN_INCOMPLETE','WSL_PROCESS_START_FAILED')){'WSL_DISTRO_TERMINATE_FAILED'}else{$publicCode}
+        }
     }
     finally{
         # A same-name replacement between authorization and mutation is fatal.
         $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
     }
-    Assert-ThriveLensDistroStopped
+    if($null -ne $terminateFailure){throw $terminateFailure}
+    try{Assert-ThriveLensDistroStopped}
+    catch{
+        $publicCode=Resolve-ThriveLensRuntimePublicCode -Code ([string]$_.Exception.Message)
+        if($publicCode -cin @('WSL_COMMAND_TIMEOUT','WSL_OUTPUT_LIMIT_EXCEEDED','WSL_OUTPUT_DRAIN_INCOMPLETE','WSL_PROCESS_START_FAILED')){throw 'WSL_RUNNING_STATE_UNAVAILABLE'}
+        throw $publicCode
+    }
+    # Windows can retain a transient WSL relay until the exact distro is
+    # terminated. Host absence belongs here, after the token-gated termination,
+    # rather than in the guest PostgreSQL graceful-stop primitive.
+    Assert-ThriveLensHostPortAbsent
 }
 
 function Assert-ThriveLensDistroStopped {
@@ -942,6 +1131,6 @@ Export-ModuleMember -Function @(
     'Assert-ThriveLensDataInventoryGate','Test-ThriveLensWslClusterExists','Assert-ThriveLensClusterScramConfig','Resolve-ThriveLensClusterProbe','Get-ThriveLensWslClusterState',
     'Assert-ThriveLensWslInternalDisk','Resolve-ThriveLensLinuxTreeRootPolicy','Assert-ThriveLensLinuxTreePolicy','Assert-ThriveLensLinuxPathPolicy',
     'Assert-ThriveLensWslAbsent','Assert-ThriveLensWslLoopback','Assert-ThriveLensHostPortAbsent','Resolve-ThriveLensPortProxyMapping','Assert-ThriveLensNoHostPortProxy','Assert-ThriveLensHostLoopback',
-    'Stop-ThriveLensPostgresUnderLock','Stop-ThriveLensDistroAndVerify','Assert-ThriveLensDistroStopped','Resolve-ThriveLensChildOutcome','Resolve-ThriveLensStartChildExit','Resolve-ThriveLensPreTokenStartObservation','Resolve-ThriveLensCleanupContainmentPolicy','Resolve-ThriveLensWrongPasswordProbe',
+    'Stop-ThriveLensPostgresUnderLock','Stop-ThriveLensDistroAndVerify','Assert-ThriveLensDistroStopped','Resolve-ThriveLensChildOutcome','Resolve-ThriveLensStartChildExit','Resolve-ThriveLensPreTokenStartObservation','Resolve-ThriveLensCleanupContainmentPolicy','Resolve-ThriveLensWrongPasswordProbe','Resolve-ThriveLensRuntimePublicCode','Test-ThriveLensCredentialAbsenceProbeAllowed','Test-ThriveLensCredentialCleanupAllowedAfterFailure','Test-ThriveLensCleanupFailurePreservesIdentityAuthority','Resolve-ThriveLensDistroCleanupFailure','Resolve-ThriveLensCredentialCleanupResult','Resolve-ThriveLensCredentialFailureCode','Resolve-ThriveLensRuntimeFailureStage','Resolve-ThriveLensRuntimeCleanupOutcome',
     'Enter-ThriveLensLifecycleLock','Exit-ThriveLensLifecycleLock'
 )
