@@ -75,7 +75,7 @@ function Assert-ThriveLensAuthenticatedScalar {
         $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
         $probe = Invoke-ThriveLensGuardedDistro -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock -Arguments @(
             '/usr/sbin/runuser', '-u', 'postgres', '--',
-            '/usr/bin/env', '-i', "PGPASSFILE=$AuthFile", 'PGCONNECT_TIMEOUT=5',
+            '/usr/bin/env', '-i', "PGPASSFILE=$AuthFile", 'PGCONNECT_TIMEOUT=5', 'PGREQUIREAUTH=scram-sha-256',
             '/usr/bin/psql', '-X', '-w', '-h', '127.0.0.1', '-p', '55432',
             '-U', 'tl_bootstrap', '-d', 'postgres', '-Atq',
             '--set=ON_ERROR_STOP=1', '--command', $Sql
@@ -260,7 +260,7 @@ try {
                 $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
                 $wrongProbe = Invoke-ThriveLensGuardedDistro -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock -CapturePrivateStandardError -Arguments @(
                     '/usr/sbin/runuser', '-u', 'postgres', '--',
-                    '/usr/bin/env', '-i', 'LC_ALL=C', 'LANG=C', "PGPASSFILE=$wrongAuthFile", 'PGCONNECT_TIMEOUT=5',
+                    '/usr/bin/env', '-i', 'LC_ALL=C', 'LANG=C', "PGPASSFILE=$wrongAuthFile", 'PGCONNECT_TIMEOUT=5', 'PGREQUIREAUTH=scram-sha-256',
                     '/usr/bin/psql', '-X', '-w', '-h', '127.0.0.1', '-p', '55432',
                     '-U', 'tl_bootstrap', '-d', 'postgres', '-Atq',
                     '--set=ON_ERROR_STOP=1', '--command', 'SELECT 1'
@@ -296,7 +296,6 @@ try {
                     if($credentialCode -ceq 'AUTH_FILE_CLEANUP_REMOVE_FAILED'){$credentialRemoveFailed=$true}
                     if($null -eq $wrongOperationFailure){throw $credentialCode}
                 }}
-                $wrongAuthFile = $null
             }
 
             # Prove the same server remains usable through correct SCRAM auth;
@@ -314,14 +313,17 @@ try {
                 -ExitCode $wrongExitCode `
                 -PrivateStandardOutput $wrongStandardOutput `
                 -PrivateStandardError $wrongPrivateError `
+                -ExpectedPasswordFile $wrongAuthFile `
                 -ServerUsableAfterProbe $serverUsableAfterWrong
             if($wrongOutcome.Status -cne 'AUTHENTICATION_REJECTED'){throw 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE'}
+            $wrongAuthFile=$null
             $wrongOutcome=$null;$wrongStandardOutput=$null;$wrongPrivateError=$null
         }
         catch{$correctOperationFailure=[string]$_.Exception.Message;throw}
         finally {
             $bootstrapSecret = $null
             $correctCreate = $null
+            $wrongAuthFile = $null
             $wrongStandardOutput = $null
             $wrongPrivateError = $null
             if($null -ne $correctOperationFailure -and -not (Test-ThriveLensCredentialCleanupAllowedAfterFailure -FailureCode $correctOperationFailure)){

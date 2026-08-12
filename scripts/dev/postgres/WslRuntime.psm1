@@ -1049,15 +1049,25 @@ function Resolve-ThriveLensWrongPasswordProbe {
         [Parameter(Mandatory)][int]$ExitCode,
         [AllowEmptyString()][string]$PrivateStandardOutput = '',
         [AllowEmptyString()][string]$PrivateStandardError = '',
+        [Parameter(Mandatory)][string]$ExpectedPasswordFile,
         [Parameter(Mandatory)][bool]$ServerUsableAfterProbe
     )
     if($ExitCode -eq 0){throw 'WRONG_PASSWORD_WAS_ACCEPTED'}
     if(-not [string]::IsNullOrEmpty($PrivateStandardOutput)){throw 'WRONG_PASSWORD_PROBE_UNEXPECTED_OUTPUT'}
     if($ExitCode -ne 2){throw 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE'}
-    $expected='psql: error: connection to server at "127.0.0.1", port 55432 failed: FATAL:  password authentication failed for user "tl_bootstrap"'
-    $normalized=$PrivateStandardError -replace "`r`n","`n"
+    if($ExpectedPasswordFile -cnotmatch '\A/run/thrivelens-r0-wrong-[0-9a-f]{32}\.pgpass\z'){
+        throw 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE'
+    }
+    if($PrivateStandardError.Length -gt 512 -or $PrivateStandardError -cmatch '[^\x0A\x20-\x7E]'){
+        throw 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE'
+    }
+    $authError='psql: error: connection to server at "127.0.0.1", port 55432 failed: FATAL:  password authentication failed for user "tl_bootstrap"'
+    $passwordFileError='password retrieved from file "'+$ExpectedPasswordFile+'"'
+    $normalized=$PrivateStandardError
     if($normalized.EndsWith("`n",[StringComparison]::Ordinal)){$normalized=$normalized.Substring(0,$normalized.Length-1)}
-    if($normalized -cne $expected){throw 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE'}
+    if($normalized -cne ($authError+"`n"+$passwordFileError)){
+        throw 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE'
+    }
     if(-not $ServerUsableAfterProbe){throw 'WRONG_PASSWORD_SERVER_USABILITY_UNVERIFIED'}
     return [pscustomobject]@{Status='AUTHENTICATION_REJECTED';ExitCode=2}
 }

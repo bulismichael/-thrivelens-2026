@@ -7,6 +7,23 @@ function A([bool]$ok,[string]$code){$script:count++;if(-not $ok){$fail.Add($code
 function Test-ThrowsExact([scriptblock]$Action,[string]$ExpectedCode){
  try{$null=& $Action;return $false}catch{return $_.Exception.Message -ceq $ExpectedCode}
 }
+function Get-ArrayArgumentTokenText([Management.Automation.Language.CommandAst]$Command,[string]$ParameterName){
+ $elements=@($Command.CommandElements)
+ for($i=0;$i -lt ($elements.Count-1);$i++){
+  if($elements[$i] -is [Management.Automation.Language.CommandParameterAst] -and $elements[$i].ParameterName -ceq $ParameterName){
+   $argument=$elements[$i+1]
+   if($argument -isnot [Management.Automation.Language.ArrayExpressionAst]){return @()}
+   $statements=@($argument.SubExpression.Statements)
+   if($statements.Count -ne 1 -or $statements[0] -isnot [Management.Automation.Language.PipelineAst]){return @()}
+   $pipelineElements=@($statements[0].PipelineElements)
+   if($pipelineElements.Count -ne 1 -or $pipelineElements[0] -isnot [Management.Automation.Language.CommandExpressionAst]){return @()}
+   $expression=$pipelineElements[0].Expression
+   if($expression -isnot [Management.Automation.Language.ArrayLiteralAst]){return @()}
+   return @($expression.Elements|ForEach-Object{$_.Extent.Text})
+  }
+ }
+ return @()
+}
 try{
  $root=(Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
  $manifest=Get-Content (Join-Path $root 'config\toolchains\backend.json') -Raw|ConvertFrom-Json
@@ -55,22 +72,50 @@ try{
   A (Test-ThrowsExact {Stop-ThriveLensDistroAndVerify -IdentityToken $identityToken -LifecycleLock $releasedLock} 'LIFECYCLE_LOCK_OWNERSHIP_REQUIRED') 'NATIVE_RELEASED_MUTEX_REJECTED'
   $null=$releasedLock.WaitOne(0)
  }finally{Exit-ThriveLensLifecycleLock -Mutex $releasedLock}
+ $wrongPasswordPath='/run/thrivelens-r0-wrong-0123456789abcdef0123456789abcdef.pgpass'
+ $otherWrongPasswordPath='/run/thrivelens-r0-wrong-fedcba9876543210fedcba9876543210.pgpass'
  $authError='psql: error: connection to server at "127.0.0.1", port 55432 failed: FATAL:  password authentication failed for user "tl_bootstrap"'
- $authRejected=Resolve-ThriveLensWrongPasswordProbe -ExitCode 2 -PrivateStandardOutput '' -PrivateStandardError ($authError+"`n") -ServerUsableAfterProbe $true
- A ($authRejected.Status -ceq 'AUTHENTICATION_REJECTED') 'WRONG_PASSWORD_EXACT_REJECTION_ACCEPTED'
- A (Test-ThrowsExact {Resolve-ThriveLensWrongPasswordProbe -ExitCode 0 -PrivateStandardOutput '1' -PrivateStandardError '' -ServerUsableAfterProbe $true} 'WRONG_PASSWORD_WAS_ACCEPTED') 'WRONG_PASSWORD_SUCCESS_REJECTED'
- A (Test-ThrowsExact {Resolve-ThriveLensWrongPasswordProbe -ExitCode 2 -PrivateStandardOutput ' ' -PrivateStandardError $authError -ServerUsableAfterProbe $true} 'WRONG_PASSWORD_PROBE_UNEXPECTED_OUTPUT') 'WRONG_PASSWORD_WHITESPACE_STDOUT_REJECTED'
- A (Test-ThrowsExact {Resolve-ThriveLensWrongPasswordProbe -ExitCode 1 -PrivateStandardOutput '' -PrivateStandardError $authError -ServerUsableAfterProbe $true} 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE') 'WRONG_PASSWORD_WRONG_EXIT_REJECTED'
- $authNearMisses=@(
-  ('prefix'+$authError),($authError+' suffix'),($authError+"`n`n"),
-  ($authError -replace '127\.0\.0\.1','localhost'),($authError -replace '55432','55433'),
-  ($authError -replace 'tl_bootstrap','postgres'),'psql: error: client executable failure'
+ $passwordFileError='password retrieved from file "'+$wrongPasswordPath+'"'
+ $acceptedAuthDiagnostics=@(
+  ($authError+"`n"+$passwordFileError),($authError+"`n"+$passwordFileError+"`n")
  )
- A ($authNearMisses.Count -eq 7) 'WRONG_PASSWORD_NEAR_MISS_MATRIX_COMPLETE'
- foreach($nearMiss in $authNearMisses){
-  A (Test-ThrowsExact {Resolve-ThriveLensWrongPasswordProbe -ExitCode 2 -PrivateStandardOutput '' -PrivateStandardError $nearMiss -ServerUsableAfterProbe $true} 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE') 'WRONG_PASSWORD_DIAGNOSTIC_NEAR_MISS_REJECTED'
+ A ($acceptedAuthDiagnostics.Count -eq 2) 'WRONG_PASSWORD_ACCEPTED_MATRIX_COMPLETE'
+ foreach($acceptedDiagnostic in $acceptedAuthDiagnostics){
+  $authRejected=Resolve-ThriveLensWrongPasswordProbe -ExitCode 2 -PrivateStandardOutput '' -PrivateStandardError $acceptedDiagnostic -ExpectedPasswordFile $wrongPasswordPath -ServerUsableAfterProbe $true
+  A ($authRejected.Status -ceq 'AUTHENTICATION_REJECTED' -and $authRejected.ExitCode -eq 2) 'WRONG_PASSWORD_EXACT_REJECTION_ACCEPTED'
  }
- A (Test-ThrowsExact {Resolve-ThriveLensWrongPasswordProbe -ExitCode 2 -PrivateStandardOutput '' -PrivateStandardError $authError -ServerUsableAfterProbe $false} 'WRONG_PASSWORD_SERVER_USABILITY_UNVERIFIED') 'WRONG_PASSWORD_SERVER_UNUSABLE_REJECTED'
+ A (Test-ThrowsExact {Resolve-ThriveLensWrongPasswordProbe -ExitCode 0 -PrivateStandardOutput '1' -PrivateStandardError '' -ExpectedPasswordFile $wrongPasswordPath -ServerUsableAfterProbe $true} 'WRONG_PASSWORD_WAS_ACCEPTED') 'WRONG_PASSWORD_SUCCESS_REJECTED'
+ A (Test-ThrowsExact {Resolve-ThriveLensWrongPasswordProbe -ExitCode 2 -PrivateStandardOutput ' ' -PrivateStandardError $authError -ExpectedPasswordFile $wrongPasswordPath -ServerUsableAfterProbe $true} 'WRONG_PASSWORD_PROBE_UNEXPECTED_OUTPUT') 'WRONG_PASSWORD_WHITESPACE_STDOUT_REJECTED'
+ A (Test-ThrowsExact {Resolve-ThriveLensWrongPasswordProbe -ExitCode 1 -PrivateStandardOutput '' -PrivateStandardError ($authError+"`n"+$passwordFileError) -ExpectedPasswordFile $wrongPasswordPath -ServerUsableAfterProbe $true} 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE') 'WRONG_PASSWORD_WRONG_EXIT_REJECTED'
+ $authNearMisses=@(
+  $authError,($authError+"`n"),($authError+"`r`n"),
+  ('prefix'+$authError),($authError+' suffix'),($authError+"`n`n"),($authError+"`r`n`r`n"),
+  ($authError -replace '127\.0\.0\.1','localhost'),($authError -replace '55432','55433'),
+  ($authError -replace 'tl_bootstrap','postgres'),(($authError -replace 'FATAL','fatal')+"`n"+$passwordFileError),'psql: error: client executable failure',
+  $passwordFileError,($authError+"`npassword retrieved from file `"$otherWrongPasswordPath`""),
+  ($authError+"`n"+$passwordFileError+' suffix'),($authError+"`n"+$passwordFileError+"`nextra"),
+  ($authError+"`n"+$passwordFileError+"`n`n"),($authError+"`r"),
+  ($authError+"`n"+$passwordFileError+"`r"),($authError+"`r`n"+$passwordFileError+"`r`n"),
+  ($authError+"`t")
+ )
+ A ($authNearMisses.Count -eq 21) 'WRONG_PASSWORD_NEAR_MISS_MATRIX_COMPLETE'
+ foreach($nearMiss in $authNearMisses){
+  A (Test-ThrowsExact {Resolve-ThriveLensWrongPasswordProbe -ExitCode 2 -PrivateStandardOutput '' -PrivateStandardError $nearMiss -ExpectedPasswordFile $wrongPasswordPath -ServerUsableAfterProbe $true} 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE') 'WRONG_PASSWORD_DIAGNOSTIC_NEAR_MISS_REJECTED'
+ }
+ foreach($hostileDiagnostic in @(
+  ($authError+[char]0),($authError+[char]0x00e9),[string]::new('x',513)
+ )){
+  A (Test-ThrowsExact {Resolve-ThriveLensWrongPasswordProbe -ExitCode 2 -PrivateStandardOutput '' -PrivateStandardError $hostileDiagnostic -ExpectedPasswordFile $wrongPasswordPath -ServerUsableAfterProbe $true} 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE') 'WRONG_PASSWORD_HOSTILE_DIAGNOSTIC_REJECTED'
+ }
+ foreach($invalidExpectedPath in @(
+  '/run/thrivelens-r0-wrong-0123456789ABCDEF0123456789abcdef.pgpass',
+  '/run/thrivelens-r0-auth-0123456789abcdef0123456789abcdef.pgpass',
+  ($wrongPasswordPath+'.extra'),($wrongPasswordPath+"`n")
+ )){
+  $invalidPathDiagnostic=$authError+"`npassword retrieved from file `"$invalidExpectedPath`""
+  A (Test-ThrowsExact {Resolve-ThriveLensWrongPasswordProbe -ExitCode 2 -PrivateStandardOutput '' -PrivateStandardError $invalidPathDiagnostic -ExpectedPasswordFile $invalidExpectedPath -ServerUsableAfterProbe $true} 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE') 'WRONG_PASSWORD_EXPECTED_PATH_REJECTED'
+ }
+ A (Test-ThrowsExact {Resolve-ThriveLensWrongPasswordProbe -ExitCode 2 -PrivateStandardOutput '' -PrivateStandardError ($authError+"`n"+$passwordFileError) -ExpectedPasswordFile $wrongPasswordPath -ServerUsableAfterProbe $false} 'WRONG_PASSWORD_SERVER_USABILITY_UNVERIFIED') 'WRONG_PASSWORD_SERVER_UNUSABLE_REJECTED'
  $secretValue=$null
  try{
   $secretPath=[IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$manifest.wsl_fallback.host_password_file))
@@ -279,8 +324,24 @@ try{
  A ($runtimeTest -match 'PASSWORD_ENCRYPTION_PROBE_FAILED') 'RUNTIME_PASSWORD_ENCRYPTION_MARKER'
  A ($runtimeTest -match 'SCRAM_VERIFIER_PROBE_FAILED') 'RUNTIME_VERIFIER_MARKER'
  A ($runtimeTest -match 'Resolve-ThriveLensWrongPasswordProbe' -and $runtimeTest -match 'CapturePrivateStandardError' -and $runtimeTest -match "'LC_ALL=C'") 'RUNTIME_WRONG_PASSWORD_CLASSIFIER'
- $wrongProbeIndex=$runtimeTest.IndexOf('$wrongProbe = Invoke-ThriveLensGuardedDistro');$usabilityFalseIndex=$runtimeTest.IndexOf('$serverUsableAfterWrong=$false',$wrongProbeIndex);$usabilityQueryIndex=$runtimeTest.IndexOf("-FailureCode 'WRONG_PASSWORD_SERVER_USABILITY_UNVERIFIED'",$usabilityFalseIndex);$usabilityTrueIndex=$runtimeTest.IndexOf('$serverUsableAfterWrong=$true',$usabilityQueryIndex);$classifierIndex=$runtimeTest.IndexOf('$wrongOutcome=Resolve-ThriveLensWrongPasswordProbe',$usabilityTrueIndex)
+ $guardedCalls=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Invoke-ThriveLensGuardedDistro'},$true))
+ $positiveProbeTokens=@("'/usr/sbin/runuser'","'-u'","'postgres'","'--'","'/usr/bin/env'","'-i'",'"PGPASSFILE=$AuthFile"',"'PGCONNECT_TIMEOUT=5'","'PGREQUIREAUTH=scram-sha-256'","'/usr/bin/psql'","'-X'","'-w'","'-h'","'127.0.0.1'","'-p'","'55432'","'-U'","'tl_bootstrap'","'-d'","'postgres'","'-Atq'","'--set=ON_ERROR_STOP=1'","'--command'",'$Sql')
+ $wrongProbeTokens=@("'/usr/sbin/runuser'","'-u'","'postgres'","'--'","'/usr/bin/env'","'-i'","'LC_ALL=C'","'LANG=C'",'"PGPASSFILE=$wrongAuthFile"',"'PGCONNECT_TIMEOUT=5'","'PGREQUIREAUTH=scram-sha-256'","'/usr/bin/psql'","'-X'","'-w'","'-h'","'127.0.0.1'","'-p'","'55432'","'-U'","'tl_bootstrap'","'-d'","'postgres'","'-Atq'","'--set=ON_ERROR_STOP=1'","'--command'","'SELECT 1'")
+ $wrongInstallTokens=@("'/usr/bin/install'","'-o'","'postgres'","'-g'","'postgres'","'-m'","'0600'","'/dev/stdin'",'$wrongAuthFile')
+ $positiveProbeCalls=@($guardedCalls|Where-Object{((Get-ArrayArgumentTokenText -Command $_ -ParameterName 'Arguments')-join "`n") -ceq ($positiveProbeTokens-join "`n")})
+ $wrongProbeCalls=@($guardedCalls|Where-Object{((Get-ArrayArgumentTokenText -Command $_ -ParameterName 'Arguments')-join "`n") -ceq ($wrongProbeTokens-join "`n")})
+ $wrongInstallCalls=@($guardedCalls|Where-Object{((Get-ArrayArgumentTokenText -Command $_ -ParameterName 'Arguments')-join "`n") -ceq ($wrongInstallTokens-join "`n")})
+ A ($positiveProbeCalls.Count -eq 1 -and $wrongProbeCalls.Count -eq 1 -and $wrongInstallCalls.Count -eq 1) 'RUNTIME_EXACT_SCRAM_PROBE_ARGUMENT_ASTS'
+ $wrongProbeAst=$wrongProbeCalls[0];$wrongInstallAst=$wrongInstallCalls[0]
+ A (@($wrongProbeAst.CommandElements|Where-Object{$_ -is [Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -ceq 'CapturePrivateStandardError'}).Count -eq 1) 'RUNTIME_WRONG_PROBE_PRIVATE_STDERR_AST'
+ $wrongProbeIndex=$wrongProbeAst.Extent.StartOffset
+ $wrongCredentialDeleteIndex=$runtimeTest.IndexOf('Remove-ThriveLensRuntimeCredential -Path $wrongAuthFile',$wrongProbeIndex);$usabilityFalseIndex=$runtimeTest.IndexOf('$serverUsableAfterWrong=$false',$wrongCredentialDeleteIndex);$usabilityQueryIndex=$runtimeTest.IndexOf("-FailureCode 'WRONG_PASSWORD_SERVER_USABILITY_UNVERIFIED'",$usabilityFalseIndex);$usabilityTrueIndex=$runtimeTest.IndexOf('$serverUsableAfterWrong=$true',$usabilityQueryIndex);$classifierIndex=$runtimeTest.IndexOf('$wrongOutcome=Resolve-ThriveLensWrongPasswordProbe',$usabilityTrueIndex)
  A ($wrongProbeIndex -ge 0 -and $usabilityFalseIndex -gt $wrongProbeIndex -and $usabilityQueryIndex -gt $usabilityFalseIndex -and $usabilityTrueIndex -gt $usabilityQueryIndex -and $classifierIndex -gt $usabilityTrueIndex -and $runtimeTest.Substring($classifierIndex,[Math]::Min(500,$runtimeTest.Length-$classifierIndex)) -match '-ServerUsableAfterProbe \$serverUsableAfterWrong') 'RUNTIME_WRONG_PASSWORD_USABILITY_ORDERED'
+ $expectedPathBindingIndex=$runtimeTest.IndexOf('-ExpectedPasswordFile $wrongAuthFile',$classifierIndex);$wrongPathClearIndex=$runtimeTest.IndexOf('$wrongAuthFile=$null',$expectedPathBindingIndex)
+ $wrongRemoveCalls=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Remove-ThriveLensRuntimeCredential' -and $node.Extent.Text -match '-Path\s+\$wrongAuthFile(?:\s|$)'},$true))
+ $wrongClassifierCalls=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Resolve-ThriveLensWrongPasswordProbe' -and $node.Extent.Text -match '-ExpectedPasswordFile\s+\$wrongAuthFile(?:\s|$)'},$true))
+ $wrongClears=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$wrongAuthFile' -and $node.Right.Extent.Text -ceq '$null'},$true)|Where-Object{$_.Extent.StartOffset -gt $wrongInstallAst.Extent.StartOffset})
+ A ($wrongRemoveCalls.Count -eq 1 -and $wrongClassifierCalls.Count -eq 1 -and $wrongClears.Count -ge 1 -and $wrongInstallAst.Extent.StartOffset -lt $wrongProbeAst.Extent.StartOffset -and $wrongProbeAst.Extent.StartOffset -lt $wrongRemoveCalls[0].Extent.StartOffset -and $wrongRemoveCalls[0].Extent.StartOffset -lt $wrongClassifierCalls[0].Extent.StartOffset -and $wrongClassifierCalls[0].Extent.StartOffset -lt $wrongClears[0].Extent.StartOffset -and $runtimeTest.Substring($wrongInstallAst.Extent.StartOffset,$wrongClassifierCalls[0].Extent.StartOffset-$wrongInstallAst.Extent.StartOffset) -notmatch '\$wrongAuthFile\s*=\s*\$null') 'RUNTIME_WRONG_PASSWORD_PATH_PRIVATE_LIFETIME'
  $runtimeStartIndex=$runtimeTest.IndexOf('$started=$true;$start=');$probeLockIndex=$runtimeTest.IndexOf('$probeLifecycleLock=Enter-ThriveLensLifecycleLock',$runtimeStartIndex);$probeTokenIndex=$runtimeTest.IndexOf('$probeIdentityToken=Get-ThriveLensWslCleanupIdentityToken',$probeLockIndex);$firstRuntimeDistroIndex=$runtimeTest.IndexOf('Assert-ThriveLensClusterScramConfig',$runtimeStartIndex);$successStopIndex=$runtimeTest.IndexOf('$wasRunning=Stop-ThriveLensPostgresUnderLock',$probeTokenIndex);$successTerminateIndex=$runtimeTest.IndexOf('Stop-ThriveLensDistroAndVerify -IdentityToken $probeIdentityToken',$successStopIndex);$probeReleaseIndex=$runtimeTest.IndexOf('Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock',$successTerminateIndex)
  A ($probeLockIndex -gt $runtimeStartIndex -and $probeTokenIndex -gt $probeLockIndex -and $firstRuntimeDistroIndex -gt $probeTokenIndex -and $successStopIndex -gt $firstRuntimeDistroIndex -and $successTerminateIndex -gt $successStopIndex -and $probeReleaseIndex -gt $successTerminateIndex) 'RUNTIME_PROBE_LOCK_TOKEN_LIFECYCLE_ORDERED'
  $catchIndex=$runtimeTest.IndexOf("catch {",$runtimeTest.IndexOf("} | ConvertTo-Json -Compress"));$sameTokenCatchStop=$runtimeTest.IndexOf('Stop-ThriveLensPostgresUnderLock -IdentityToken $probeIdentityToken',$catchIndex);$sameTokenCatchTerminate=$runtimeTest.IndexOf('Stop-ThriveLensDistroAndVerify -IdentityToken $probeIdentityToken',$sameTokenCatchStop);$catchRelease=$runtimeTest.IndexOf('Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock',$sameTokenCatchTerminate);$preTokenObservation=$runtimeTest.IndexOf('Resolve-ThriveLensPreTokenStartObservation',$catchRelease);$freshStopInvocation=$runtimeTest.IndexOf("& pwsh -NoProfile -File (Join-Path `$PSScriptRoot 'stop.ps1')")
