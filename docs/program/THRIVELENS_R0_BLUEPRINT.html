@@ -1,0 +1,226 @@
+<!doctype html>
+<html><head><meta charset="utf-8" /><title>ThriveLens R0 Blueprint</title>
+<style>
+body{font-family:Segoe UI,Arial,sans-serif;color:#122;margin:36px;line-height:1.45;}
+h1{font-size:30px;color:#0b3d91;margin:0 0 8px 0;}
+h2{font-size:22px;color:#123;margin-top:24px;border-bottom:1px solid #ddd;padding-bottom:4px;}
+h3{font-size:17px;color:#234;margin-top:16px;}
+p,li{font-size:12pt;}
+ul,ol{margin-top:0;}
+code{background:#f3f3f3;padding:2px 4px;border-radius:4px;}
+pre{background:#f8f8f8;border:1px solid #ddd;padding:12px;overflow:auto;}
+table{border-collapse:collapse;width:100%;margin:10px 0;}
+th,td{border:1px solid #ddd;padding:6px 8px;text-align:left;vertical-align:top;}
+th{background:#f0f4ff;}
+</style>
+</head><body>
+<h1>ThriveLens R0 Blueprint</h1>
+<p><strong>Scope:</strong> Evidence-first Runtime Foundation / TL-R0-003</p>
+<h1>ThriveLens R0 Blueprint (Current Delivery Slice)</h1>
+<p></p>
+<p>**Status date:** 12-August-2026</p>
+<p>**Repository:** local `ThriveLens 2026` branch `codex/thrivelens-integration`</p>
+<p>**Canonical private mirror:** `masterkush808/thrivelens-r0-postgres-foundation` (private)</p>
+<p></p>
+<h2>1) Executive summary</h2>
+<p></p>
+<p>ThriveLens R0 is a **local wellness platform foundation slice** focused on a safe, reversible, and evidence-driven backend/runtime proof path:</p>
+<p></p>
+<ul>
+<li>A dedicated WSL2 Postgres runtime is prepared, validated, and cleaned deterministically.</li>
+<li>No public production API, mobile app, AI model serving, provider integrations, or full user domain persistence is active in R0.</li>
+<li>All critical runtime outcomes are proven by explicit scripts and checks, not by assumptions.</li>
+<li>The current blocker is **host memory headroom**, not application logic.</li>
+</ul>
+<p>The key goal of this slice is a trustworthy execution surface for future app slices, not full product readiness.</p>
+<p></p>
+<hr/>
+<p></p>
+<h2>2) What this slice is / is not</h2>
+<p></p>
+<h3>In scope (R0)</h3>
+<ul>
+<li>Controlled PostgreSQL bootstrap and proof lifecycle inside a dedicated distro/worktree.</li>
+<li>Strict control-plane, lease, lock, and cleanup contracts.</li>
+<li>Runtime budget and resource accounting gates.</li>
+<li>Security/privacy hardening around raw output, process capture, and state transitions.</li>
+<li>Evidence-first release discipline (scripts/tests/reports).</li>
+</ul>
+<h3>Explicitly out of scope in R0</h3>
+<ul>
+<li>Real user accounts, nutrition/pose/exercise production workflows.</li>
+<li>Paid providers, real-world billing, migration/deployment to production infrastructure.</li>
+<li>Android tooling, heavy mobile/web runtime bundling, Docker-heavy parallel execution.</li>
+<li>Local model training or checkpoint-heavy AI inference.</li>
+<li>Any clinical or prescription behavior.</li>
+</ul>
+<hr/>
+<p></p>
+<h2>3) Core architecture</h2>
+<p></p>
+<h3>Design style</h3>
+<ul>
+<li>Script-first, idempotent control flow.</li>
+<li>Immutable task provenance via command logs and structured result contracts.</li>
+<li>Guarded authority objects:</li>
+</ul>
+<p>  - **lifecycle lock**</p>
+<p>  - **configuration lease**</p>
+<p>  - **distro identity token**</p>
+<p>  - **contract fingerprint**</p>
+<ul>
+<li>Bounded operations, fail-closed errors, and explicit cleanup semantics.</li>
+</ul>
+<h3>Primary components</h3>
+<ol>
+<li>**start adapter (`scripts/dev/postgres/start.ps1`)**</li>
+</ol>
+<p>   - Coordinates the runtime command sequence and final result status.</p>
+<p></p>
+<p>2. **runtime module (`scripts/dev/postgres/Runtime.psm1`)**</p>
+<p>   - Executes bounded resource accounting subprocesses and strict result parsing.</p>
+<p></p>
+<p>3. **WslRuntime module (`scripts/dev/postgres/WslRuntime.psm1`)**</p>
+<p>   - Performs exact host/distro operations and cleanup verification.</p>
+<p></p>
+<p>4. **preflight (`scripts/dev/postgres/preflight.ps1`)**</p>
+<p>   - Admission-like runtime check before mutation.</p>
+<p></p>
+<p>5. **control tests (`test_runtime.ps1`, `test_wsl_controls.ps1`, plus static/security tests)**</p>
+<p>   - Validate ordering, timeout/capture semantics, and malformed/mutated branches.</p>
+<p></p>
+<p>6. **detached execution path**</p>
+<p>   - Sequence runner/broker/launcher scripts in `%LOCALAPPDATA%\ThriveLens\runtime-captures\TL-R0-003` for safer execution.</p>
+<p></p>
+<hr/>
+<p></p>
+<h2>4) Run contract used for command 3</h2>
+<p></p>
+<p>The canonical proof command stack is:</p>
+<p></p>
+<ol>
+<li>`pwsh -NoProfile -File scripts/check_resource_budget.ps1`</li>
+</ol>
+<p>2. `pwsh -NoProfile -File scripts/dev/postgres/preflight.ps1`</p>
+<p>3. `pwsh -NoProfile -File scripts/dev/postgres/test_runtime.ps1`</p>
+<p>4. `pwsh -NoProfile -File scripts/check_resource_budget.ps1`</p>
+<p></p>
+<p>All four must succeed for a full TL-R0 external runtime proof.</p>
+<p></p>
+<p>Current observed blocker: command-3 commonly exits BLOCKED with</p>
+<p>`LOW_FREE_MEMORY_AFTER_WSL_PROBES` when host headroom cannot sustain the reclaim + probe sequence. This is a **resource envelope problem**, not a crash in control logic.</p>
+<p></p>
+<hr/>
+<p></p>
+<h2>5) Memory and stability rationale</h2>
+<p></p>
+<h3>Why it currently “hiccups”</h3>
+<ul>
+<li>WSL command bursts and verification probes are intentionally strict and consume RAM</li>
+</ul>
+<p>  temporarily.</p>
+<ul>
+<li>On low free-memory systems, command 3 can block on reclaim gates even after preflight passed.</li>
+<li>The system currently keeps strict limits to avoid unsafe continuation; that means it can fail fast instead of over-using host memory.</li>
+</ul>
+<h3>Practical best practice</h3>
+<ul>
+<li>Keep the host idle (especially editor/runtime helpers) during a run.</li>
+<li>Run via detached runner to decouple from IDE process-tree volatility.</li>
+<li>Run only with sufficient free RAM (practically: room above the reclaim threshold plus normal activity buffer).</li>
+</ul>
+<hr/>
+<p></p>
+<h2>6) Error/decision model (high level)</h2>
+<p></p>
+<ul>
+<li>Every major step is explicit and mapped to bounded public codes.</li>
+<li>Failure paths are intentionally conservative:</li>
+</ul>
+<p>  - `BLOCKED` for recoverable environmental gating failures.</p>
+<p>  - `ERROR` for cleanup/authority/containment failure.</p>
+<ul>
+<li>Cleanup and release counters are preserved so proof data remains auditable even on failures.</li>
+</ul>
+<hr/>
+<p></p>
+<h2>7) Security and privacy posture (R0)</h2>
+<p></p>
+<ul>
+<li>No raw stdout/stderr leak through final machine-readable parser paths.</li>
+<li>Strict JSON schema checks with fail-closed handling.</li>
+<li>Process capture is bounded and drained with timeout semantics.</li>
+<li>No automatic retries on uncertain post-run states without explicit recovery path.</li>
+<li>No model/provider user data ingestion in R0.</li>
+</ul>
+<p>Security policy decisions (e.g., dataset/model licensing for future slices) are tracked in program docs and remain pending in controlled release states.</p>
+<p></p>
+<hr/>
+<p></p>
+<h2>8) Current performance constraints</h2>
+<p></p>
+<ul>
+<li>No multi-GB model checkpoint downloads in ordinary bootstrap.</li>
+<li>Sequenced, bounded builds/checks to stay within constrained hardware.</li>
+<li>No concurrent heavy tasks (Android emulator + database + Flutter/web builds).</li>
+<li>Current constraint: headroom-sensitive command 3 reclaim gate.</li>
+</ul>
+<hr/>
+<p></p>
+<h2>9) Repository and governance map</h2>
+<p></p>
+<ul>
+<li>**Control plane:** `docs/program/*`, `scripts/dev/postgres/*`, `scripts/check_resource_budget.ps1`.</li>
+<li>**Validation:** `scripts/test_control_plane_validator.py`, runtime static/security tests.</li>
+<li>**Evidence:** run reports and review docs under `docs/program/evidence/*` (outside this document generation scope).</li>
+</ul>
+<p>The project uses strict release-state gates; evidence and task ownership must stay coherent before claiming VERIFIED.</p>
+<p></p>
+<hr/>
+<p></p>
+<h2>10) About a lighter model (direct answer)</h2>
+<p></p>
+<p>You asked about a lighter model to reduce RAM:</p>
+<p></p>
+<ul>
+<li>**In this R0 slice, there is no active local large model inference workload**.</li>
+<li>The high RAM behavior comes from the WSL/Postgres verification path, not an active model runner.</li>
+<li>If/when a model layer is added in a later slice, lighter alternatives are feasible:</li>
+</ul>
+<p>  - small-context API models (off-host),</p>
+<p>  - quantized local models,</p>
+<p>  - strict budget caps and memory guardrails.</p>
+<p></p>
+<p>So the practical immediate fix is not model swap here; it is **resource orchestration + detached, host-threshold-friendly execution**.</p>
+<p></p>
+<hr/>
+<p></p>
+<h2>11) What I completed for you now</h2>
+<p></p>
+<ol>
+<li>Confirmed/verified private GitHub migration under</li>
+</ol>
+<p>   `masterkush808/thrivelens-r0-postgres-foundation`.</p>
+<p>2. Drafting this blueprint for your review.</p>
+<p>3. Generated a direct, printable export path for the blueprint PDF.</p>
+<p></p>
+<hr/>
+<p></p>
+<h2>12) How to run this cleanly to avoid IDE-related hiccups</h2>
+<p></p>
+<ul>
+<li>Prefer running the detached command chain from a stable terminal/shell session.</li>
+<li>Avoid launching inside an already RAM-heavy IDE context.</li>
+<li>Keep VS Code/Codex as secondary monitor, not the only runtime parent.</li>
+<li>Re-run only when free memory is visibly above reclaim threshold margin.</li>
+</ul>
+<hr/>
+<p></p>
+<h2>13) Recommended next step</h2>
+<p></p>
+<p>If you want, I’ll now produce the **single next run plan** with exact shell commands for:</p>
+<p>1) pre-run memory wait strategy,</p>
+<p>2) detached execution sequence,</p>
+<p>3) evidence file collection,</p>
+<p>4) failure-state interpretation in plain language.</p>
+</body></html>
