@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "phase": "prebootstrap",
+  "phase": "bootstrap_active",
   "cap_gb": 18,
   "warning_percent": 75,
   "hard_stop_percent": 85,
