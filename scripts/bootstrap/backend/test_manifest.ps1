@@ -67,7 +67,8 @@ try {
     Assert-Condition ([int]$manifest.postgresql.port -eq 55432) 'POSTGRES_PORT'
     Assert-Condition ([int64]$manifest.postgresql.maximum_total_postgresql_bytes -lt 1073741824) 'POSTGRES_ALLOCATION'
 
-    Assert-Condition ([string]$manifest.wsl_fallback.status -ceq 'ACTIVATED_PACKAGES_VERIFIED') 'WSL_STATUS'
+    Assert-Condition ([string]$manifest.status -ceq 'WSL_POSTGRES_CLUSTER_INITIALIZED_RUNTIME_VERIFICATION_PENDING') 'BACKEND_STATUS'
+    Assert-Condition ([string]$manifest.wsl_fallback.status -ceq 'ACTIVATED_CLUSTER_INITIALIZED_RUNTIME_VERIFICATION_PENDING') 'WSL_STATUS'
     Assert-Condition ([string]$manifest.wsl_fallback.human_system_authority -ceq 'AUTHORIZED_2026-08-12_FOR_DEDICATED_DISTRO_ONLY') 'WSL_HUMAN_AUTHORITY'
     Assert-Condition ([string]$manifest.wsl_fallback.distribution_name -ceq 'ThriveLens-R0') 'WSL_DISTRO_NAME'
     Assert-Condition ([string]$manifest.wsl_fallback.distribution_install_root -ceq '%LOCALAPPDATA%\ThriveLens\wsl\ThriveLens-R0') 'WSL_DISTRO_ROOT'
@@ -132,6 +133,7 @@ try {
     Assert-Condition ([string]$manifest.data_inventory_gate.status -ceq 'SATISFIED') 'DATA_INVENTORY_GATE'
     Assert-Condition ([string]$manifest.data_inventory_gate.owned_document -ceq 'docs/privacy/DATA_INVENTORY.md') 'DATA_INVENTORY_PATH'
     Assert-Condition ([string]$manifest.data_inventory_gate.ownership_note -cmatch 'integration owner added') 'DATA_INVENTORY_OWNERSHIP'
+    Assert-Condition ([string]$manifest.provisioning_status -ceq 'DEDICATED_WSL_EXACT_PACKAGES_AND_INITIALIZED_STOPPED_CLUSTER_PRESENT') 'PROVISIONING_STATUS'
     Assert-Condition ($raw -notmatch '(?i)C:\\Users\\|/home/|/Users/') 'PRIVATE_PATH'
     Assert-Condition ($raw -notmatch '(?i)(password|token|secret)"\s*:\s*"[^"\s]+"') 'SECRET_VALUE'
     Assert-Condition ($raw -notmatch 'maximum_archive_entries') 'NO_ARCHIVE_PARSER_POLICY'

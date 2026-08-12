@@ -12,15 +12,20 @@ $blockers = [Collections.Generic.List[string]]::new()
 $projection = [int64]0
 $wslProbed = $false
 $preflightLock = $null
+$cleanupIdentityToken = $null
 
 function Stop-ThriveLensPreflightDistro {
+    param(
+        [Parameter(Mandatory)]$IdentityToken,
+        [Parameter(Mandatory)][Threading.Mutex]$LifecycleLock
+    )
     # Preflight never owns a running database. Under the lifecycle lock, prove
     # there is no PostgreSQL process/listener before terminating the exact
     # project distro that read-only probes may have launched.
+    $null = Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
     Assert-ThriveLensWslAbsent
     Assert-ThriveLensHostPortAbsent
-    $null = Assert-ThriveLensWslCleanupIdentity
-    Stop-ThriveLensDistroAndVerify
+    Stop-ThriveLensDistroAndVerify -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
     Assert-ThriveLensHostPortAbsent
 }
 
@@ -28,6 +33,9 @@ try {
     Import-Module (Join-Path $PSScriptRoot 'Runtime.psm1') -Force
     Import-Module (Join-Path $PSScriptRoot 'WslRuntime.psm1') -Force
     $preflightLock=Enter-ThriveLensLifecycleLock
+    # Host-only identity authority is captured under the lifecycle mutex before
+    # the first command that can launch the dedicated distro.
+    $cleanupIdentityToken=Get-ThriveLensWslCleanupIdentityToken -LifecycleLock $preflightLock
     $manifest = Get-ThriveLensManifest
     try{if (@($manifest.resource_policy.allowed_active_phases) -cnotcontains (Get-ThriveLensResourcePhase)) { $blockers.Add('RESOURCE_PHASE_NOT_ACTIVE') }}catch{$blockers.Add('RESOURCE_PHASE_UNAVAILABLE')}
     if ($Action -eq 'Install') {
@@ -42,9 +50,9 @@ try {
         [pscustomobject]@{schema_version=1;status='BLOCKED';action=$Action;install_kind=if($Action -eq 'Install'){$InstallKind}else{$null};projected_additional_bytes=$projection;codes=@($blockers|Select-Object -Unique)}|ConvertTo-Json -Compress;exit 2
     }
     $wslProbed = $true
-    try { $null = Assert-ThriveLensWslIdentity } catch { $blockers.Add($_.Exception.Message) }
+    try { $null = Assert-ThriveLensWslIdentity -IdentityToken $cleanupIdentityToken -LifecycleLock $preflightLock } catch { $blockers.Add($_.Exception.Message) }
     if($blockers.Count -gt 0){
-        try { Stop-ThriveLensPreflightDistro } catch {
+        try { Stop-ThriveLensPreflightDistro -IdentityToken $cleanupIdentityToken -LifecycleLock $preflightLock } catch {
             [pscustomobject]@{schema_version=1;status='ERROR';action=$Action;codes=@('PREFLIGHT_DISTRO_CLEANUP_FAILED')}|ConvertTo-Json -Compress;exit 3
         }
         [pscustomobject]@{schema_version=1;status='BLOCKED';action=$Action;install_kind=if($Action -eq 'Install'){$InstallKind}else{$null};projected_additional_bytes=$projection;codes=@($blockers|ForEach-Object{if($_ -match '^[A-Z0-9_]+$'){$_}else{'WSL_IDENTITY_FAILED'}}|Select-Object -Unique)}|ConvertTo-Json -Compress;exit 2
@@ -58,7 +66,7 @@ try {
         try{$clusterState=Get-ThriveLensWslClusterState;if($clusterState -ceq 'ABSENT'){$blockers.Add('POSTGRES_CLUSTER_UNAVAILABLE')}elseif($clusterState -cne 'VALID'){$blockers.Add('PARTIAL_CLUSTER_PRESENT')}}catch{$blockers.Add('CLUSTER_STATE_MEASUREMENT_UNAVAILABLE')}
     }
     try{if((Get-ThriveLensFreeMemoryBytes) -lt $minimum){$blockers.Add('LOW_FREE_MEMORY_AFTER_WSL_PROBES')}}catch{$blockers.Add('MEMORY_MEASUREMENT_UNAVAILABLE_AFTER_WSL_PROBES')}
-    try { Stop-ThriveLensPreflightDistro } catch {
+    try { Stop-ThriveLensPreflightDistro -IdentityToken $cleanupIdentityToken -LifecycleLock $preflightLock } catch {
         [pscustomobject]@{schema_version=1;status='ERROR';action=$Action;codes=@('PREFLIGHT_DISTRO_CLEANUP_FAILED')}|ConvertTo-Json -Compress;exit 3
     }
     if ($blockers.Count -gt 0) {
@@ -69,7 +77,7 @@ try {
     [pscustomobject]@{ schema_version=1; status='READY'; action=$Action; install_kind=if($Action -eq 'Install'){$InstallKind}else{$null}; projected_additional_bytes=$projection; codes=@() } | ConvertTo-Json -Compress
 }
 catch {
-    if($wslProbed){try{Stop-ThriveLensPreflightDistro}catch{}}
+    if($wslProbed -and $null -ne $preflightLock -and $null -ne $cleanupIdentityToken){try{Stop-ThriveLensPreflightDistro -IdentityToken $cleanupIdentityToken -LifecycleLock $preflightLock}catch{}}
     [pscustomobject]@{ schema_version=1; status='ERROR'; action=$Action; codes=@('PREFLIGHT_INTERNAL_ERROR') } | ConvertTo-Json -Compress
     exit 3
 }

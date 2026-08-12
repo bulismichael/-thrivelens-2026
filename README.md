@@ -4,7 +4,7 @@ ThriveLens is being delivered release-by-release. R0 is the foundation heartbeat
 
 ## Current platform status
 
-The counted, project-only `ThriveLens-R0` WSL2 distribution now exists under `%LOCALAPPDATA%\ThriveLens\wsl\ThriveLens-R0` with a 6 GiB virtual-disk ceiling. Ubuntu 24.04 and the exact PostgreSQL 17.10 PGDG package closure are verified by bounded read-only checks. Ubuntu publishes the selected WSL artifact at exactly 391,541,571 bytes with signed SHA256SUMS metadata; the original `wsl --web-download` payload was not retained, so the current VHD is not byte-attested by that hash. Packages are present; no database cluster or runtime is claimed until initialization and the real two-cycle runtime test pass.
+The counted, project-only `ThriveLens-R0` WSL2 distribution now exists under `%LOCALAPPDATA%\ThriveLens\wsl\ThriveLens-R0` with a 6 GiB virtual-disk ceiling. Ubuntu 24.04 and the exact PostgreSQL 17.10 PGDG package closure are verified by bounded checks. Ubuntu publishes the selected WSL artifact at exactly 391,541,571 bytes with signed SHA256SUMS metadata; the original `wsl --web-download` payload was not retained, so the current VHD is not byte-attested by that hash. A noncanonical diagnostic run initialized the checksum-enabled SCRAM cluster and left it stopped; the corrected two-cycle runtime verification is still pending.
 
 A lightweight read-only Windows snapshot on 2026-08-12 observed the VHD file at 2,131,755,008 bytes and the aggregate counted ThriveLens root at 2,134,150,647 bytes. These are point-in-time file-size/accounting observations, not an Ubuntu image attestation.
 
@@ -14,7 +14,7 @@ A lightweight read-only Windows snapshot on 2026-08-12 observed the VHD file at 
 - APT reported `48.4 MB` of archives and `201 MB` of additional installed space. Those are APT's rounded display figures, not exact byte attestations. The 251,000,000-byte ceiling is package-only and excludes the Ubuntu distro/VHD and APT metadata, which remain covered by aggregate accounting.
 - PostgreSQL and Ubuntu installed-package copyright metadata exists inside the distro. The dependency licence inventory has not been independently enumerated or approved, and no production licence approval is inferred.
 - The PostgreSQL-only Compose descriptor is inert: `services` is empty and no repository configuration can pull or start its pinned image. Docker Desktop is not required or installed for R0, engine storage accounting is not configured, and the mandatory gated activation wrapper does not exist.
-- The dedicated distro, packages, and protected bootstrap credential now exist from the explicitly authorized external provisioning step. No PostgreSQL cluster, service, migration, API, backup, or production licence/approval is claimed yet.
+- The dedicated distro, packages, protected bootstrap credential, and initialized stopped cluster now exist. No continuously running service, migration, API, backup, or production licence/approval is claimed.
 
 The authoritative details and primary-source links are in [the R0 platform note](docs/program/task-notes/r0/platform.md) and the machine-readable manifest at `config/toolchains/backend.json`.
 
@@ -40,7 +40,7 @@ pwsh -NoProfile -File scripts/dev/postgres/test_wsl_controls.ps1
 pwsh -NoProfile -File scripts/dev/postgres/preflight.ps1
 ```
 
-The manifest, static, security, and WSL-control tests should pass. Until initialization, runtime preflight truthfully returns `POSTGRES_CLUSTER_UNAVAILABLE`.
+The manifest, static, security, and WSL-control tests should pass. With the initialized cluster stopped, runtime preflight must return `READY` and leave the dedicated distro stopped.
 
 ## Provisioning boundary
 
@@ -48,13 +48,15 @@ There is no approved Windows PostgreSQL provisioning sequence. Do not download t
 
 There is likewise no approved Python provisioning sequence. `install_python.ps1` blocks before inspecting an artifact or starting a process. A future separately reviewed implementation must first measure and bound installer scratch/cache behavior, place every persistent path under aggregate accounting, and then restore pre/post resource gates. The integration owner has now added the dedicated WSL/cluster persisted fields to `docs/privacy/DATA_INVENTORY.md`; initialization still verifies that exact content before mutation.
 
-`test_runtime.ps1` must prove two manual start/authenticated-query/stop cycles without reinitialization, WSL and Windows loopback reachability, exact versions, and exact process/listener absence **before** reporting PASS. PostgreSQL server output goes to `/dev/null`; R0 persists no raw PostgreSQL log.
+`test_runtime.ps1` must prove two manual start/authenticated-query/stop cycles without reinitialization, WSL and Windows loopback reachability, exact versions, and exact process/listener absence **before** reporting PASS. Its negative-password proof accepts only the locale-fixed PostgreSQL authentication-rejection diagnostic, keeps that stderr in a bounded private in-memory buffer, and then proves the same server still accepts the protected credential. PostgreSQL server output goes to `/dev/null`; R0 persists no raw PostgreSQL log.
 
 Stop is cleanup-safe even under low memory:
 
 ```powershell
 pwsh -NoProfile -File scripts/dev/postgres/stop.ps1
 ```
+
+Forced WSL termination is authorized only while the lifecycle mutex is held and a host-only identity token still matches the canonical Lxss GUID, name, WSL version, counted BasePath, and VHD file identity immediately before and after the command. WSL 2.6.3 exposes only name-targeted termination, so a hostile same-user/OS-control replacement in the irreducible validation-to-command window could be terminated before post-validation detects drift; this bounded residual is not atomic identity binding. Lock failure or detected identity drift never falls back to an unguarded termination.
 
 ## Compose contract
 

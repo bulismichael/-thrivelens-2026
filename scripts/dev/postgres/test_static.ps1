@@ -97,9 +97,10 @@ try {
     Assert-Condition ($preflight -match 'PYTHON_INSTALL_DISABLED_UNMEASURED_SCRATCH_CACHE') 'PYTHON_INSTALL_BLOCKER'
     Assert-Condition ($preflight -match 'PYTHON_INSTALL_DISABLED_UNMEASURED_SCRATCH_CACHE') 'PYTHON_PROJECTION_BLOCKER'
     Assert-Condition ($wslModule -match 'WSL_POSTGRES_VERSION_MISMATCH') 'RUNTIME_EXACT_VERSIONS'
-    Assert-Condition ($runtimeTest -match 'stop\.ps1[\s\S]+status=''PASS''') 'TEST_STOP_BEFORE_PASS'
+    Assert-Condition ($runtimeTest -match 'Stop-ThriveLensPostgresUnderLock[\s\S]+Stop-ThriveLensDistroAndVerify[\s\S]+Assert-ThriveLensDistroStopped[\s\S]+Assert-ThriveLensHostPortAbsent[\s\S]+status=''PASS''') 'TEST_SAME_TOKEN_STOP_BEFORE_PASS'
     Assert-Condition ($runtimeTest.IndexOf('$started=$true') -lt $runtimeTest.IndexOf("start.ps1")) 'TEST_MARKS_START_BEFORE_CHILD'
-    Assert-Condition ($runtimeTest -match '\$started=\$true;\$start=') 'TEST_NONZERO_START_INDEPENDENT_CLEANUP'
+    $runtimeStopChildInvocation = "& pwsh -NoProfile -File (Join-Path `$PSScriptRoot 'stop.ps1')"
+    Assert-Condition ($runtimeTest -match 'Resolve-ThriveLensPreTokenStartObservation' -and $runtimeTest.IndexOf($runtimeStopChildInvocation,[StringComparison]::Ordinal) -lt 0) 'TEST_PRETOKEN_START_READ_ONLY_OBSERVATION'
     Assert-Condition ($runtimeTest -match 'RUNTIME_START_PROBE_FAILED') 'TEST_CHILD_FAILURE_CLASSIFIER'
     Assert-Condition ($runtimeTest -match 'RUNTIME_CLEANUP_FAILED') 'TEST_CLEANUP_OUTCOME_CLASSIFIER'
     Assert-Condition ($start -match 'POSTGRES_START_CLEANUP_FAILED') 'TEST_PRESERVES_START_FATAL'

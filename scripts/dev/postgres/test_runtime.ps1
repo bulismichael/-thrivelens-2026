@@ -7,7 +7,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Remove-ThriveLensRuntimeCredential {
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$IdentityToken,
+        [Parameter(Mandatory)][Threading.Mutex]$LifecycleLock
+    )
 
     if ($Path -cnotmatch '^/run/thrivelens-r0-(?:auth|wrong)-[0-9a-f]{32}\.pgpass$') {
         throw 'AUTH_FILE_PATH_INVALID'
@@ -19,17 +23,25 @@ function Remove-ThriveLensRuntimeCredential {
     $absenceVerified = $false
     try {
         try {
-            $removeResult = Invoke-ThriveLensDistro -Arguments @('/usr/bin/rm', '-f', '--', $Path)
+            $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
+            $removeResult = Invoke-ThriveLensGuardedDistro -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock -Arguments @('/usr/bin/rm', '-f', '--', $Path)
             $removeSucceeded = $removeResult.ExitCode -eq 0
         }
-        catch { $removeSucceeded = $false }
+        catch {
+            $removeCode=if($_.Exception.Message -match '^[A-Z0-9_]+$'){$_.Exception.Message}else{'AUTH_FILE_CLEANUP_FAILED'}
+            throw $removeCode
+        }
 
         # Absence is measured even when rm fails or its bounded invocation throws.
         try {
-            $absenceResult = Invoke-ThriveLensDistro -Arguments @('/usr/bin/test', '!', '-e', $Path)
+            $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
+            $absenceResult = Invoke-ThriveLensGuardedDistro -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock -Arguments @('/usr/bin/test', '!', '-e', $Path)
             $absenceVerified = $absenceResult.ExitCode -eq 0
         }
-        catch { $absenceVerified = $false }
+        catch {
+            $absenceCode=if($_.Exception.Message -match '^[A-Z0-9_]+$'){$_.Exception.Message}else{'AUTH_FILE_CLEANUP_FAILED'}
+            throw $absenceCode
+        }
 
         if (-not $removeSucceeded -or -not $absenceVerified) {
             throw 'AUTH_FILE_CLEANUP_FAILED'
@@ -46,7 +58,9 @@ function Assert-ThriveLensAuthenticatedScalar {
         [Parameter(Mandatory)][string]$AuthFile,
         [Parameter(Mandatory)][string]$Sql,
         [Parameter(Mandatory)][string]$Expected,
-        [Parameter(Mandatory)][string]$FailureCode
+        [Parameter(Mandatory)][string]$FailureCode,
+        [Parameter(Mandatory)]$IdentityToken,
+        [Parameter(Mandatory)][Threading.Mutex]$LifecycleLock
     )
 
     if ($AuthFile -cnotmatch '^/run/thrivelens-r0-auth-[0-9a-f]{32}\.pgpass$') {
@@ -55,7 +69,8 @@ function Assert-ThriveLensAuthenticatedScalar {
 
     $probe = $null
     try {
-        $probe = Invoke-ThriveLensDistro -Arguments @(
+        $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
+        $probe = Invoke-ThriveLensGuardedDistro -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock -Arguments @(
             '/usr/sbin/runuser', '-u', 'postgres', '--',
             '/usr/bin/env', '-i', "PGPASSFILE=$AuthFile", 'PGCONNECT_TIMEOUT=5',
             '/usr/bin/psql', '-X', '-w', '-h', '127.0.0.1', '-p', '55432',
@@ -79,6 +94,12 @@ $bootstrapSecret = $null
 $wrongSecret = $null
 $correctAuthFile = $null
 $wrongAuthFile = $null
+$wrongStandardOutput = $null
+$wrongPrivateError = $null
+$wrongOutcome = $null
+$probeLifecycleLock = $null
+$probeIdentityToken = $null
+$probeIdentityEverEstablished = $false
 $distroAbsenceVerified = $false
 $hostAbsenceVerified = $false
 
@@ -125,16 +146,31 @@ try {
         # attempt before invocation so every outcome enters independent cleanup.
         $distroAbsenceVerified = $false
         $hostAbsenceVerified = $false
+        $probeIdentityEverEstablished = $false
+        $startExitCode = 3
         $started=$true;$start=@(& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'start.ps1') 2>&1)
         $startExitCode = $LASTEXITCODE
         $start = $null
-        if ($startExitCode -ne 0) {
-            $failureExitCode = if ($startExitCode -eq 3) { 3 } else { 2 }
-            if ($startExitCode -eq 3) { throw 'RUNTIME_START_CHILD_FATAL' }
+        $startOutcome=Resolve-ThriveLensStartChildExit -ExitCode $startExitCode
+        if ($startOutcome.ExitCode -ne 0) {
+            $failureExitCode=[int]$startOutcome.ExitCode
+            if($startOutcome.Fatal){throw [string]$startOutcome.Code}
+            # Exit 2 carries no mutation authority. The catch path performs
+            # host-only absence observations and never launches a cleanup child.
             throw 'RUNTIME_START_PROBE_FAILED'
         }
 
+        # The start child releases its mutex before returning. The parent now
+        # takes ownership and captures a fresh host-only identity token before
+        # its first name-addressed distro command. Hold this fence through every
+        # probe, transient credential deletion, and same-token shutdown.
+        $probeLifecycleLock=Enter-ThriveLensLifecycleLock
+        $probeIdentityToken=Get-ThriveLensWslCleanupIdentityToken -LifecycleLock $probeLifecycleLock
+        $probeIdentityEverEstablished=$true
+        $null=Assert-ThriveLensWslIdentity -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+        $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
         Assert-ThriveLensClusterScramConfig
+        $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
         Assert-ThriveLensWslLoopback
         Assert-ThriveLensHostLoopback
 
@@ -144,7 +180,8 @@ try {
         $correctCreate = $null
         try {
             $bootstrapSecret = Read-ThriveLensPostgresBootstrapSecret -Path $actual
-            $correctCreate = Invoke-ThriveLensDistro `
+            $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+            $correctCreate = Invoke-ThriveLensGuardedDistro -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock `
                 -StandardInput ("127.0.0.1:55432:postgres:tl_bootstrap:$bootstrapSecret`n") `
                 -Arguments @(
                     '/usr/bin/install', '-o', 'postgres', '-g', 'postgres', '-m', '0600',
@@ -161,101 +198,134 @@ try {
                 -AuthFile $correctAuthFile `
                 -Sql 'SELECT 1' `
                 -Expected '1' `
-                -FailureCode 'SCRAM_AUTH_PROBE_FAILED'
+                -FailureCode 'SCRAM_AUTH_PROBE_FAILED' `
+                -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
             Assert-ThriveLensAuthenticatedScalar `
                 -AuthFile $correctAuthFile `
                 -Sql 'SHOW password_encryption' `
                 -Expected 'scram-sha-256' `
-                -FailureCode 'PASSWORD_ENCRYPTION_PROBE_FAILED'
+                -FailureCode 'PASSWORD_ENCRYPTION_PROBE_FAILED' `
+                -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
             Assert-ThriveLensAuthenticatedScalar `
                 -AuthFile $correctAuthFile `
                 -Sql 'SELECT COALESCE((count(*) > 0) AND bool_and(error IS NULL) AND bool_and(auth_method = ''scram-sha-256''), false) FROM pg_hba_file_rules' `
                 -Expected 't' `
-                -FailureCode 'HBA_SCRAM_PROBE_FAILED'
+                -FailureCode 'HBA_SCRAM_PROBE_FAILED' `
+                -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
             Assert-ThriveLensAuthenticatedScalar `
                 -AuthFile $correctAuthFile `
                 -Sql 'SELECT COALESCE((count(*) = 1) AND bool_and(rolpassword LIKE ''SCRAM-SHA-256$%''), false) FROM pg_authid WHERE rolname = ''tl_bootstrap''' `
                 -Expected 't' `
-                -FailureCode 'SCRAM_VERIFIER_PROBE_FAILED'
+                -FailureCode 'SCRAM_VERIFIER_PROBE_FAILED' `
+                -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+            # This fixed synthetic Base64Url value has a prefix rejected by the
+            # hardened real-secret reader, so it cannot equal an accepted secret.
+            $wrongSecret = 'placeholder_R0_wrong_password_probe_0123456789ABCDEF'
+            if ($wrongSecret -cnotmatch '^[A-Za-z0-9_-]{43,128}$') {
+                throw 'WRONG_PASSWORD_FIXTURE_INVALID'
+            }
+            $wrongAuthFile = '/run/thrivelens-r0-wrong-' + [guid]::NewGuid().ToString('N') + '.pgpass'
+            $wrongCreate = $null
+            $wrongProbe = $null
+            $wrongExitCode = -1
+            $wrongStandardOutput = $null
+            $wrongPrivateError = $null
+            try {
+                $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+                $wrongCreate = Invoke-ThriveLensGuardedDistro -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock `
+                    -StandardInput ("127.0.0.1:55432:postgres:tl_bootstrap:$wrongSecret`n") `
+                    -Arguments @(
+                        '/usr/bin/install', '-o', 'postgres', '-g', 'postgres', '-m', '0600',
+                        '/dev/stdin', $wrongAuthFile
+                    )
+                $wrongSecret = $null
+                if ($wrongCreate.ExitCode -ne 0) { throw 'WRONG_AUTH_FILE_CREATE_FAILED' }
+                $wrongCreate = $null
+
+                # stderr stays in the shared 128 KiB in-memory budget and is
+                # consumed only by the exact locale-fixed classifier below.
+                $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+                $wrongProbe = Invoke-ThriveLensGuardedDistro -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock -CapturePrivateStandardError -Arguments @(
+                    '/usr/sbin/runuser', '-u', 'postgres', '--',
+                    '/usr/bin/env', '-i', 'LC_ALL=C', 'LANG=C', "PGPASSFILE=$wrongAuthFile", 'PGCONNECT_TIMEOUT=5',
+                    '/usr/bin/psql', '-X', '-w', '-h', '127.0.0.1', '-p', '55432',
+                    '-U', 'tl_bootstrap', '-d', 'postgres', '-Atq',
+                    '--set=ON_ERROR_STOP=1', '--command', 'SELECT 1'
+                )
+                $wrongExitCode=[int]$wrongProbe.ExitCode
+                $wrongStandardOutput=[string]$wrongProbe.PrivateStandardOutput
+                $wrongPrivateError=[string]$wrongProbe.PrivateStandardError
+            }
+            finally {
+                $wrongSecret = $null
+                $wrongCreate = $null
+                $wrongProbe = $null
+                try {
+                    Remove-ThriveLensRuntimeCredential -Path $wrongAuthFile -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+                }
+                catch {
+                    $credentialCleanupFatal = $true
+                    $credentialCode=if($_.Exception.Message -match '^[A-Z0-9_]+$'){$_.Exception.Message}else{'AUTH_FILE_CLEANUP_FAILED'}
+                    throw $credentialCode
+                }
+                finally { $wrongAuthFile = $null }
+            }
+
+            # Prove the same server remains usable through correct SCRAM auth;
+            # arbitrary client/query/transport failures cannot count as a valid
+            # negative-auth result.
+            $serverUsableAfterWrong=$false
+            Assert-ThriveLensAuthenticatedScalar `
+                -AuthFile $correctAuthFile `
+                -Sql 'SELECT 1' `
+                -Expected '1' `
+                -FailureCode 'WRONG_PASSWORD_SERVER_USABILITY_UNVERIFIED' `
+                -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+            $serverUsableAfterWrong=$true
+            $wrongOutcome=Resolve-ThriveLensWrongPasswordProbe `
+                -ExitCode $wrongExitCode `
+                -PrivateStandardOutput $wrongStandardOutput `
+                -PrivateStandardError $wrongPrivateError `
+                -ServerUsableAfterProbe $serverUsableAfterWrong
+            if($wrongOutcome.Status -cne 'AUTHENTICATION_REJECTED'){throw 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE'}
+            $wrongOutcome=$null;$wrongStandardOutput=$null;$wrongPrivateError=$null
         }
         finally {
             $bootstrapSecret = $null
             $correctCreate = $null
+            $wrongStandardOutput = $null
+            $wrongPrivateError = $null
             try {
-                Remove-ThriveLensRuntimeCredential -Path $correctAuthFile
+                Remove-ThriveLensRuntimeCredential -Path $correctAuthFile -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
             }
             catch {
                 $credentialCleanupFatal = $true
-                throw 'AUTH_FILE_CLEANUP_FAILED'
+                $credentialCode=if($_.Exception.Message -match '^[A-Z0-9_]+$'){$_.Exception.Message}else{'AUTH_FILE_CLEANUP_FAILED'}
+                throw $credentialCode
             }
             finally { $correctAuthFile = $null }
         }
 
-        # This fixed synthetic value is Base64Url and starts with a prefix the
-        # hardened reader rejects, so it cannot equal an accepted real secret.
-        # The correct bridge has already been deleted and proved absent above.
-        $wrongSecret = 'placeholder_R0_wrong_password_probe_0123456789ABCDEF'
-        if ($wrongSecret -cnotmatch '^[A-Za-z0-9_-]{43,128}$') {
-            throw 'WRONG_PASSWORD_FIXTURE_INVALID'
-        }
-        $wrongAuthFile = '/run/thrivelens-r0-wrong-' + [guid]::NewGuid().ToString('N') + '.pgpass'
-        $wrongCreate = $null
-        $wrongProbe = $null
-        try {
-            $wrongCreate = Invoke-ThriveLensDistro `
-                -StandardInput ("127.0.0.1:55432:postgres:tl_bootstrap:$wrongSecret`n") `
-                -Arguments @(
-                    '/usr/bin/install', '-o', 'postgres', '-g', 'postgres', '-m', '0600',
-                    '/dev/stdin', $wrongAuthFile
-                )
-            $wrongSecret = $null
-            if ($wrongCreate.ExitCode -ne 0) { throw 'WRONG_AUTH_FILE_CREATE_FAILED' }
-            $wrongCreate = $null
-
-            $wrongProbe = Invoke-ThriveLensDistro -Arguments @(
-                '/usr/sbin/runuser', '-u', 'postgres', '--',
-                '/usr/bin/env', '-i', "PGPASSFILE=$wrongAuthFile", 'PGCONNECT_TIMEOUT=5',
-                '/usr/bin/psql', '-X', '-w', '-h', '127.0.0.1', '-p', '55432',
-                '-U', 'tl_bootstrap', '-d', 'postgres', '-Atq',
-                '--set=ON_ERROR_STOP=1', '--command', 'SELECT 1'
-            )
-            if ($wrongProbe.ExitCode -eq 0) { throw 'WRONG_PASSWORD_WAS_ACCEPTED' }
-        }
-        finally {
-            $wrongSecret = $null
-            $wrongCreate = $null
-            $wrongProbe = $null
-            try {
-                Remove-ThriveLensRuntimeCredential -Path $wrongAuthFile
-            }
-            catch {
-                $credentialCleanupFatal = $true
-                throw 'AUTH_FILE_CLEANUP_FAILED'
-            }
-            finally { $wrongAuthFile = $null }
-        }
-
         # A negative authentication result is accepted only while the same
         # loopback-only server remains reachable.
+        $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
         Assert-ThriveLensWslLoopback
         Assert-ThriveLensHostLoopback
-
-        $stopOutput = @(& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'stop.ps1') 2>&1)
-        $stopExitCode = $LASTEXITCODE
-        $stopOutput = $null
-        if ($stopExitCode -ne 0) {
-            $failureExitCode = if ($stopExitCode -eq 3) { 3 } else { 2 }
-            if ($stopExitCode -eq 3) { throw 'RUNTIME_STOP_CHILD_FATAL' }
-            throw 'RUNTIME_STOP_PROBE_FAILED'
-        }
-
-        # Do not trust the child cleanup claim: independently verify the exact
-        # dedicated distro and Windows host boundary after every attempt.
+        $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+        # Preserve identity continuity through successful cleanup too. WSL has
+        # no supported GUID-targeted terminate command, so releasing the mutex
+        # and minting a new token here would widen the accepted name race.
+        $wasRunning=Stop-ThriveLensPostgresUnderLock -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
+        if(-not $wasRunning){throw 'RUNTIME_POSTGRES_NOT_RUNNING_AT_STOP'}
+        $null=Invoke-ThriveLensResourceGate
+        Stop-ThriveLensDistroAndVerify -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock
         Assert-ThriveLensDistroStopped
         $distroAbsenceVerified = $true
         Assert-ThriveLensHostPortAbsent
         $hostAbsenceVerified = $true
         $started = $false
+        Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock
+        $probeLifecycleLock=$null;$probeIdentityToken=$null
     }
 
     [pscustomobject]@{
@@ -279,41 +349,49 @@ catch {
     $code = if ($rawCode -match '^[A-Z0-9_]+$') { $rawCode } else { 'RUNTIME_TEST_INTERNAL_ERROR' }
     $cleanupRequired = $started
     $cleanupInvocationFailed = $false
+    $cleanupIdentityChanged=$false
 
-    if ($started) {
-        # Invoke cleanup after every attempted start, including nonzero and
-        # fatal children. Exact absence probes run independently even if the
-        # cleanup child itself fails.
-        $cleanupOutput = $null
-        try {
-            $cleanupOutput = @(& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'stop.ps1') 2>&1)
-            $cleanupExitCode = $LASTEXITCODE
-            if ($cleanupExitCode -eq 3) { $failureExitCode = 3 }
+    # Once a cycle has captured an identity token, cleanup stays under that
+    # same mutex/token authority. Never release it and mint fresh authority for
+    # a same-name replacement. Graceful and forced cleanup remain independent.
+    if($started -and $probeIdentityEverEstablished){
+        if($null -eq $probeLifecycleLock -or $null -eq $probeIdentityToken){
+            $cleanupIdentityChanged=$true;$cleanupInvocationFailed=$true;$failureExitCode=3
         }
-        catch { $cleanupInvocationFailed = $true }
-        finally { $cleanupOutput = $null }
+        else{
+            $sameTokenCleanupFailed=$false
+            try{$null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock}
+            catch{$sameTokenCleanupFailed=$true;$cleanupIdentityChanged=$true}
+            if(-not $sameTokenCleanupFailed){
+                try{$null=Stop-ThriveLensPostgresUnderLock -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock}catch{$sameTokenCleanupFailed=$true}
+                try{Stop-ThriveLensDistroAndVerify -IdentityToken $probeIdentityToken -LifecycleLock $probeLifecycleLock}catch{$sameTokenCleanupFailed=$true}
+                try{Assert-ThriveLensDistroStopped;$distroAbsenceVerified=$true}catch{$distroAbsenceVerified=$false;$sameTokenCleanupFailed=$true}
+                try{Assert-ThriveLensHostPortAbsent;$hostAbsenceVerified=$true}catch{$hostAbsenceVerified=$false;$sameTokenCleanupFailed=$true}
+            }
+            if($sameTokenCleanupFailed){$cleanupInvocationFailed=$true;$failureExitCode=3}
+            elseif($distroAbsenceVerified -and $hostAbsenceVerified){$started=$false}
+        }
+        try{Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock}catch{$cleanupInvocationFailed=$true;$failureExitCode=3}
+        $probeLifecycleLock=$null;$probeIdentityToken=$null
+        if($cleanupInvocationFailed){$code=if($cleanupIdentityChanged){'RUNTIME_CLEANUP_IDENTITY_CHANGED'}else{'RUNTIME_CLEANUP_FAILED'}}
+    }
+    elseif($null -ne $probeLifecycleLock){
+        # A lock without a completed token carries no mutation authority.
+        try{Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock}catch{$cleanupInvocationFailed=$true;$failureExitCode=3}
+        $probeLifecycleLock=$null;$probeIdentityToken=$null
+    }
 
-        try {
-            Assert-ThriveLensDistroStopped
-            $distroAbsenceVerified = $true
-        }
-        catch { $distroAbsenceVerified = $false }
-        try {
-            Assert-ThriveLensHostPortAbsent
-            $hostAbsenceVerified = $true
-        }
-        catch { $hostAbsenceVerified = $false }
-
-        if ($distroAbsenceVerified -and $hostAbsenceVerified) {
-            $started = $false
-        }
-        else {
-            $cleanupInvocationFailed = $true
-        }
-        if ($cleanupInvocationFailed) {
-            $code = 'RUNTIME_CLEANUP_FAILED'
-            $failureExitCode = 3
-        }
+    if($started -and -not $probeIdentityEverEstablished){
+        # A child exit without a parent token conveys no cleanup authority.
+        # Observe only the host WSL running list and Windows exposure state;
+        # never invoke stop.ps1 or any distribution command from this branch.
+        try{Assert-ThriveLensDistroStopped;$distroAbsenceVerified=$true}catch{$distroAbsenceVerified=$false}
+        try{Assert-ThriveLensHostPortAbsent;$hostAbsenceVerified=$true}catch{$hostAbsenceVerified=$false}
+        $observation=Resolve-ThriveLensPreTokenStartObservation -StartExitCode $startExitCode -DistroAbsent $distroAbsenceVerified -HostPortAbsent $hostAbsenceVerified
+        $code=[string]$observation.Code
+        $failureExitCode=[int]$observation.ExitCode
+        if($observation.CleanupVerified){$started=$false}
+        else{$cleanupInvocationFailed=$true}
     }
 
     $bootstrapSecret = $null
@@ -337,4 +415,6 @@ finally {
     $wrongSecret = $null
     $correctAuthFile = $null
     $wrongAuthFile = $null
+    if($null -ne $probeLifecycleLock){try{Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock}catch{};$probeLifecycleLock=$null}
+    $probeIdentityToken=$null
 }

@@ -2,13 +2,17 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:HeldLifecycleLocks = @{}
 
 if (-not ('ThriveLens.BoundedCaptureStream' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Win32.SafeHandles;
 namespace ThriveLens {
  public sealed class OutputBudget { public long Count; public readonly long Limit; public volatile bool Exceeded; public OutputBudget(long limit){Limit=limit;} }
  public sealed class BoundedCaptureStream : Stream {
@@ -25,6 +29,49 @@ namespace ThriveLens {
   public override long Seek(long o,SeekOrigin s)=>throw new NotSupportedException();public override void SetLength(long v)=>throw new NotSupportedException();
   protected override void Dispose(bool disposing){if(disposing)data.Dispose();base.Dispose(disposing);}
  }
+ public sealed class HostFileIdentity {
+  public string FinalPath { get; private set; }
+  public string Identity { get; private set; }
+  public FileAttributes Attributes { get; private set; }
+  public uint LinkCount { get; private set; }
+  HostFileIdentity(string path,string identity,FileAttributes attributes,uint links){FinalPath=path;Identity=identity;Attributes=attributes;LinkCount=links;}
+  [StructLayout(LayoutKind.Sequential)] struct Info {
+   public uint FileAttributes; public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+   public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime; public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+   public uint VolumeSerialNumber; public uint FileSizeHigh; public uint FileSizeLow; public uint NumberOfLinks; public uint FileIndexHigh; public uint FileIndexLow;
+  }
+  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFileW(string name,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle file,out Info info);
+  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern uint GetFinalPathNameByHandle(SafeFileHandle file,StringBuilder path,uint length,uint flags);
+  public static HostFileIdentity Capture(string path){
+   const uint FILE_READ_ATTRIBUTES=0x80, SHARE_ALL=7, OPEN_EXISTING=3, OPEN_REPARSE_POINT=0x00200000, BACKUP_SEMANTICS=0x02000000;
+   using(SafeFileHandle file=CreateFileW(path,FILE_READ_ATTRIBUTES,SHARE_ALL,IntPtr.Zero,OPEN_EXISTING,OPEN_REPARSE_POINT|BACKUP_SEMANTICS,IntPtr.Zero)){
+    if(file.IsInvalid)throw new IOException("FILE_IDENTITY_UNAVAILABLE"); Info info;
+    if(!GetFileInformationByHandle(file,out info))throw new IOException("FILE_IDENTITY_UNAVAILABLE");
+    uint capacity=512;StringBuilder finalPath=new StringBuilder((int)capacity);uint written=GetFinalPathNameByHandle(file,finalPath,capacity,0);
+    if(written==0)throw new IOException("FILE_FINAL_PATH_UNAVAILABLE");
+    if(written>=capacity){capacity=checked(written+1);finalPath=new StringBuilder((int)capacity);written=GetFinalPathNameByHandle(file,finalPath,capacity,0);if(written==0||written>=capacity)throw new IOException("FILE_FINAL_PATH_UNAVAILABLE");}
+    string identity=info.VolumeSerialNumber.ToString("X8")+":"+info.FileIndexHigh.ToString("X8")+info.FileIndexLow.ToString("X8");
+    return new HostFileIdentity(finalPath.ToString(),identity,(FileAttributes)info.FileAttributes,info.NumberOfLinks);
+   }
+  }
+ }
+ public static class MutexOwnershipVerifier {
+  public static bool IsOwnedByCurrentThread(Mutex mutex){
+   if(mutex==null)return false;bool recursive=false;
+   try{recursive=mutex.WaitOne(0);}catch(AbandonedMutexException){recursive=true;}catch(ObjectDisposedException){return false;}
+   if(!recursive)return false;
+   try{mutex.ReleaseMutex();}catch(ApplicationException){return false;}
+   bool otherAcquired=false;Exception failure=null;
+   Thread probe=new Thread(()=>{try{if(mutex.WaitOne(0)){otherAcquired=true;mutex.ReleaseMutex();}}catch(Exception error){failure=error;}});
+   probe.IsBackground=true;probe.Start();if(!probe.Join(2000))return false;
+   return failure==null&&!otherAcquired;
+  }
+  public static bool CheckFromNewThread(Mutex mutex){
+   bool result=true;Thread probe=new Thread(()=>{result=IsOwnedByCurrentThread(mutex);});
+   probe.IsBackground=true;probe.Start();if(!probe.Join(2000))return false;return result;
+  }
+ }
 }
 '@
 }
@@ -39,7 +86,8 @@ function Invoke-ThriveLensWsl {
     param(
         [Parameter(Mandatory)][string[]]$Arguments,
         [int]$TimeoutSeconds = 30,
-        [string]$StandardInput
+        [string]$StandardInput,
+        [switch]$CapturePrivateStandardError
     )
     if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 300) { throw 'WSL_TIMEOUT_POLICY_INVALID' }
     $start = [Diagnostics.ProcessStartInfo]::new()
@@ -76,22 +124,24 @@ function Invoke-ThriveLensWsl {
         if ($budget.Exceeded) { throw 'WSL_OUTPUT_LIMIT_EXCEEDED' }
         $captured=$stdoutSink.ToArray()
         $encoding=if($captured.Length -ge 2 -and (($captured[0] -eq 255 -and $captured[1] -eq 254) -or (@($captured|Where-Object{$_ -eq 0}).Count -gt ($captured.Length/4)))){[Text.Encoding]::Unicode}else{[Text.Encoding]::UTF8}
-        return [pscustomobject]@{ ExitCode=$process.ExitCode;Output=($encoding.GetString($captured)).Trim([char]0).Trim();Error='' }
+        $decodedOutput=$encoding.GetString($captured)
+        $privateOutput=$null
+        $privateError=$null
+        if($CapturePrivateStandardError){
+            $privateOutput=$decodedOutput
+            $capturedError=$stderrSink.ToArray()
+            $errorEncoding=if($capturedError.Length -ge 2 -and (($capturedError[0] -eq 255 -and $capturedError[1] -eq 254) -or (@($capturedError|Where-Object{$_ -eq 0}).Count -gt ($capturedError.Length/4)))){[Text.Encoding]::Unicode}else{[Text.Encoding]::UTF8}
+            $privateError=$errorEncoding.GetString($capturedError)
+            [Array]::Clear($capturedError,0,$capturedError.Length)
+        }
+        return [pscustomobject]@{ ExitCode=$process.ExitCode;Output=$decodedOutput.Trim([char]0).Trim();PrivateStandardOutput=$privateOutput;PrivateStandardError=$privateError }
     }
     catch {
         if ($started -and -not $process.HasExited) { try { $process.Kill($true); $null=$process.WaitForExit(5000) } catch { } }
-        if ($Arguments -contains '--distribution') {
-            $terminateInfo=[Diagnostics.ProcessStartInfo]::new();$terminateInfo.FileName=(Join-Path $env:SystemRoot 'System32\wsl.exe');$terminateInfo.UseShellExecute=$false;$terminateInfo.CreateNoWindow=$true
-            $null=$terminateInfo.ArgumentList.Add('--terminate');$null=$terminateInfo.ArgumentList.Add('ThriveLens-R0')
-            $terminate=[Diagnostics.Process]::Start($terminateInfo)
-            try {
-                if (-not $terminate.WaitForExit(10000)) {
-                    try{$terminate.Kill($true);$null=$terminate.WaitForExit(5000)}catch{}
-                    throw 'WSL_PROCESS_TREE_TERMINATION_UNPROVEN'
-                }
-                if ($terminate.ExitCode -ne 0) { throw 'WSL_PROCESS_TREE_TERMINATION_UNPROVEN' }
-            } finally { $terminate.Dispose() }
-        }
+        # Killing the Windows process tree is always safe. Distro termination is
+        # intentionally not attempted here: a name alone is not authority to
+        # mutate WSL state. Lifecycle callers must hold the project mutex and
+        # present a freshly revalidated host-only identity token.
         throw
     }
     finally {
@@ -100,14 +150,136 @@ function Invoke-ThriveLensWsl {
 }
 
 function Invoke-ThriveLensDistro {
-    param([Parameter(Mandatory)][string[]]$Arguments, [int]$TimeoutSeconds = 30, [string]$StandardInput)
+    param([Parameter(Mandatory)][string[]]$Arguments, [int]$TimeoutSeconds = 30, [string]$StandardInput, [switch]$CapturePrivateStandardError)
     $contract = Get-ThriveLensWslContract
     if([string]$contract.Wsl.distribution_name -cne 'ThriveLens-R0'){throw 'WSL_DISTRO_NAME_MISMATCH'}
     $all = @('--distribution', [string]$contract.Wsl.distribution_name, '--user', 'root', '--exec') + $Arguments
-    return Invoke-ThriveLensWsl -Arguments $all -TimeoutSeconds $TimeoutSeconds -StandardInput $StandardInput
+    return Invoke-ThriveLensWsl -Arguments $all -TimeoutSeconds $TimeoutSeconds -StandardInput $StandardInput -CapturePrivateStandardError:$CapturePrivateStandardError
+}
+
+function Invoke-ThriveLensGuardedDistro {
+    param(
+        [Parameter(Mandatory)]$IdentityToken,
+        [Parameter(Mandatory)][Threading.Mutex]$LifecycleLock,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [int]$TimeoutSeconds = 30,
+        [string]$StandardInput,
+        [switch]$CapturePrivateStandardError
+    )
+    $null=Assert-ThriveLensLifecycleLockOwnership -LifecycleLock $LifecycleLock
+    $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
+    $result=$null;$failureCode=$null;$postIdentityCode=$null
+    try{
+        $result=Invoke-ThriveLensDistro -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds -StandardInput $StandardInput -CapturePrivateStandardError:$CapturePrivateStandardError
+    }
+    catch{
+        $failureCode=if($_.Exception.Message -match '^[A-Z0-9_]+$'){$_.Exception.Message}else{'WSL_GUARDED_COMMAND_FAILED'}
+    }
+    finally{
+        # Revalidate even when process start, output drain, budget, or timeout
+        # handling throws. Identity drift never authorizes name-only cleanup.
+        try{$null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock}
+        catch{$postIdentityCode=if($_.Exception.Message -match '^[A-Z0-9_]+$'){$_.Exception.Message}else{'WSL_CLEANUP_IDENTITY_CHANGED'}}
+    }
+    if($null -ne $postIdentityCode){throw $postIdentityCode}
+    if($null -ne $failureCode){
+        # The host process tree has already been killed by Invoke-ThriveLensWsl.
+        # Under the same mutex and unchanged identity, contain any surviving
+        # guest child before callers can inspect or roll back filesystem state.
+        try{
+            Stop-ThriveLensDistroAndVerify -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
+            Assert-ThriveLensHostPortAbsent
+        }
+        catch{throw 'WSL_GUARDED_COMMAND_CONTAINMENT_FAILED'}
+        throw $failureCode
+    }
+    return $result
+}
+
+function Assert-ThriveLensLifecycleLockOwnership {
+    param([Parameter(Mandatory)][Threading.Mutex]$LifecycleLock)
+    $key=[Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($LifecycleLock)
+    if(-not $script:HeldLifecycleLocks.ContainsKey($key)){
+        throw 'LIFECYCLE_LOCK_OWNERSHIP_REQUIRED'
+    }
+    $record=$script:HeldLifecycleLocks[$key]
+    if(-not [object]::ReferenceEquals($record.Mutex,$LifecycleLock) -or
+       [int]$record.OwnerThreadId -ne [Environment]::CurrentManagedThreadId -or
+       -not [ThriveLens.MutexOwnershipVerifier]::IsOwnedByCurrentThread($LifecycleLock)){
+        throw 'LIFECYCLE_LOCK_OWNERSHIP_REQUIRED'
+    }
+    return $true
+}
+
+function Get-ThriveLensVhdFileIdentity {
+    param([Parameter(Mandatory)][string]$Path)
+    if(-not ('ThriveLens.HostFileIdentity' -as [type])){throw 'WSL_VHD_IDENTITY_PROVIDER_UNAVAILABLE'}
+    try{
+        $snapshot=[ThriveLens.HostFileIdentity]::Capture($Path)
+        $final=[string]$snapshot.FinalPath
+        if($final.StartsWith('\\?\',[StringComparison]::Ordinal)){$final=$final.Substring(4)}
+        $final=[IO.Path]::GetFullPath($final)
+        if($final -cne [IO.Path]::GetFullPath($Path) -or $snapshot.LinkCount -ne 1 -or (($snapshot.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)){
+            throw 'WSL_VHD_IDENTITY_MISMATCH'
+        }
+        return [pscustomobject]@{Path=$final;Identity=[string]$snapshot.Identity}
+    }
+    catch{
+        if($_.Exception.Message -match '^WSL_VHD_'){throw}
+        throw 'WSL_VHD_IDENTITY_UNAVAILABLE'
+    }
+}
+
+function Get-ThriveLensWslCleanupIdentityToken {
+    param([Parameter(Mandatory)][Threading.Mutex]$LifecycleLock)
+    $null=Assert-ThriveLensLifecycleLockOwnership -LifecycleLock $LifecycleLock
+    $contract=Get-ThriveLensWslContract;$wsl=$contract.Wsl
+    if([string]$wsl.distribution_name -cne 'ThriveLens-R0'){throw 'WSL_DISTRO_NAME_MISMATCH'}
+    $expected=[IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$wsl.distribution_install_root)).TrimEnd('\')
+    $counted=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ThriveLens')).TrimEnd('\')
+    if(-not $expected.StartsWith($counted+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'WSL_STORAGE_OUTSIDE_ATTRIBUTABLE_ROOT'}
+    $null=Assert-ThriveLensOwnedPath -Path $expected
+    $matches=@()
+    foreach($key in @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' -ErrorAction Stop)){
+        $entry=Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
+        if([string]$entry.DistributionName -ceq 'ThriveLens-R0'){$matches+=[pscustomobject]@{Key=[string]$key.PSChildName;Entry=$entry}}
+    }
+    if($matches.Count -ne 1){throw 'WSL_DISTRO_IDENTITY_MISMATCH'}
+    $parsedGuid=[guid]::Empty
+    if(-not [guid]::TryParse($matches[0].Key,[ref]$parsedGuid)){throw 'WSL_DISTRO_REGISTRY_ID_INVALID'}
+    $actual=[IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$matches[0].Entry.BasePath)).TrimEnd('\')
+    if($actual -cne $expected -or [int]$matches[0].Entry.Version -ne 2){throw 'WSL_DISTRO_LOCATION_MISMATCH'}
+    $cursor=$actual
+    while($cursor -and $cursor.StartsWith($counted,[StringComparison]::OrdinalIgnoreCase)){
+        $item=Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+        if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'WSL_STORAGE_REPARSE_REJECTED'}
+        if($cursor -ceq $counted){break};$cursor=Split-Path -Parent $cursor
+    }
+    $vhdPath=Join-Path $actual ([string]$wsl.distribution_vhd_filename)
+    $vhd=Get-ThriveLensVhdFileIdentity -Path $vhdPath
+    return [pscustomobject]@{
+        SchemaVersion=1;RegistryId=$parsedGuid.ToString('D');DistributionName='ThriveLens-R0';Version=2
+        BasePath=$actual;VhdPath=$vhd.Path;VhdIdentity=$vhd.Identity
+    }
+}
+
+function Compare-ThriveLensWslCleanupIdentityToken {
+    param([Parameter(Mandatory)]$Expected,[Parameter(Mandatory)]$Actual)
+    $names=@('SchemaVersion','RegistryId','DistributionName','Version','BasePath','VhdPath','VhdIdentity')
+    foreach($name in $names){if($null -eq $Expected.PSObject.Properties[$name] -or $null -eq $Actual.PSObject.Properties[$name]){throw 'WSL_CLEANUP_IDENTITY_TOKEN_INVALID'}}
+    if([int]$Expected.SchemaVersion -ne 1 -or [int]$Actual.SchemaVersion -ne 1 -or
+       [string]$Expected.DistributionName -cne 'ThriveLens-R0' -or [string]$Actual.DistributionName -cne 'ThriveLens-R0' -or
+       [int]$Expected.Version -ne 2 -or [int]$Actual.Version -ne 2){throw 'WSL_CLEANUP_IDENTITY_TOKEN_INVALID'}
+    foreach($name in @('RegistryId','DistributionName','BasePath','VhdPath','VhdIdentity')){
+        if([string]$Expected.$name -cne [string]$Actual.$name){throw 'WSL_CLEANUP_IDENTITY_CHANGED'}
+    }
+    if([int]$Expected.Version -ne [int]$Actual.Version){throw 'WSL_CLEANUP_IDENTITY_CHANGED'}
+    return $true
 }
 
 function Assert-ThriveLensWslIdentity {
+    param([Parameter(Mandatory)]$IdentityToken,[Parameter(Mandatory)][Threading.Mutex]$LifecycleLock)
+    $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
     $contract = Get-ThriveLensWslContract
     $wsl = $contract.Wsl
     $version = Invoke-ThriveLensWsl -Arguments @('--version')
@@ -143,21 +315,15 @@ function Assert-ThriveLensWslIdentity {
     $disk = Invoke-ThriveLensDistro -Arguments @('/usr/bin/df','-B1','--output=size','/')
     $numbers = @([regex]::Matches($disk.Output, '(?m)^\s*([0-9]+)\s*$') | ForEach-Object { [int64]$_.Groups[1].Value })
     if ($disk.ExitCode -ne 0 -or $numbers.Count -ne 1 -or $numbers[0] -gt [int64]$wsl.maximum_vhd_bytes) { throw 'WSL_VHD_CAPACITY_MISMATCH' }
+    $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
     return [pscustomobject]@{ Distribution = [string]$wsl.distribution_name; Version = 2; VhdBytes = (Get-Item $vhd).Length; CapacityBytes = $numbers[0] }
 }
 
 function Assert-ThriveLensWslCleanupIdentity {
-    $contract=Get-ThriveLensWslContract;$wsl=$contract.Wsl
-    if([string]$wsl.distribution_name -cne 'ThriveLens-R0'){throw 'WSL_DISTRO_NAME_MISMATCH'}
-    $expected=[IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$wsl.distribution_install_root)).TrimEnd('\')
-    $counted=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ThriveLens')).TrimEnd('\')
-    if(-not $expected.StartsWith($counted+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'WSL_STORAGE_OUTSIDE_ATTRIBUTABLE_ROOT'}
-    $entries=@();foreach($key in @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' -ErrorAction Stop)){$entry=Get-ItemProperty -LiteralPath $key.PSPath;if([string]$entry.DistributionName -ceq 'ThriveLens-R0'){$entries+=$entry}}
-    if($entries.Count -ne 1 -or [int]$entries[0].Version -ne 2){throw 'WSL_DISTRO_IDENTITY_MISMATCH'}
-    $actual=[IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$entries[0].BasePath)).TrimEnd('\')
-    if($actual -cne $expected){throw 'WSL_DISTRO_LOCATION_MISMATCH'}
-    $null=Assert-ThriveLensOwnedPath -Path $actual
-    return $true
+    param([Parameter(Mandatory)]$IdentityToken,[Parameter(Mandatory)][Threading.Mutex]$LifecycleLock)
+    $null=Assert-ThriveLensLifecycleLockOwnership -LifecycleLock $LifecycleLock
+    $current=Get-ThriveLensWslCleanupIdentityToken -LifecycleLock $LifecycleLock
+    return Compare-ThriveLensWslCleanupIdentityToken -Expected $IdentityToken -Actual $current
 }
 
 function Assert-ThriveLensWslPackages {
@@ -225,14 +391,26 @@ function Resolve-ThriveLensLinuxTreeRootPolicy {
 }
 
 function Assert-ThriveLensLinuxTreePolicy {
-    param([Parameter(Mandatory)][string]$Root)
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        $IdentityToken,
+        [Threading.Mutex]$LifecycleLock
+    )
     $contract = Get-ThriveLensWslContract
     $paths = Get-ThriveLensWslPaths
     $maximumEntries = [int64]$contract.Manifest.resource_policy.maximum_tree_entries
     $maximumBytes = [int64]$contract.Manifest.postgresql.maximum_initial_cluster_bytes
     if ($maximumEntries -ne 50000 -or $maximumBytes -ne 134217728) { throw 'LINUX_TREE_LIMIT_CONTRACT_MISMATCH' }
     $policy = Resolve-ThriveLensLinuxTreeRootPolicy -Root $Root -DataRoot $paths.DataRoot -LogRoot $paths.LogRoot -MaximumBytes $maximumBytes
-    $probe = Invoke-ThriveLensDistro -TimeoutSeconds 60 -Arguments @('/usr/bin/python3','-c',@'
+    $hasIdentityToken = $null -ne $IdentityToken
+    $hasLifecycleLock = $null -ne $LifecycleLock
+    if ($hasIdentityToken -ne $hasLifecycleLock) { throw 'LINUX_TREE_GUARD_ARGUMENT_MISMATCH' }
+    # A staging tree exists only after this initializer has mutated the guest.
+    # Its bounded supervisor must therefore carry the same lock and immutable
+    # host identity token so timeout/output failure is contained before any
+    # caller may attempt rollback.
+    if ($policy.Kind -ceq 'STAGING' -and -not $hasIdentityToken) { throw 'LINUX_TREE_GUARD_REQUIRED' }
+    $treeArguments = @('/usr/bin/python3','-c',@'
 import os
 import stat
 import sys
@@ -381,6 +559,12 @@ except OSError:
 if final_root.st_dev != root_stat.st_dev or final_root.st_ino != root_stat.st_ino or stat.S_ISLNK(final_root.st_mode):
     stop(TREE_MEASUREMENT)
 '@,$Root,[string]$maximumEntries,[string]$policy.MaximumBytes,'4095','64')
+    $probe = if ($hasIdentityToken) {
+        Invoke-ThriveLensGuardedDistro -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock -TimeoutSeconds 60 -Arguments $treeArguments
+    }
+    else {
+        Invoke-ThriveLensDistro -TimeoutSeconds 60 -Arguments $treeArguments
+    }
     if (-not [string]::IsNullOrWhiteSpace($probe.Output)) { throw 'WSL_TREE_MEASUREMENT_FAILED' }
     $code = switch ($probe.ExitCode) {
         0  { $null }
@@ -616,14 +800,21 @@ function Assert-ThriveLensHostLoopback {
 }
 
 function Stop-ThriveLensPostgresUnderLock {
+    param([Parameter(Mandatory)]$IdentityToken,[Parameter(Mandatory)][Threading.Mutex]$LifecycleLock)
+    $null=Assert-ThriveLensLifecycleLockOwnership -LifecycleLock $LifecycleLock
+    $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
     $state=Get-ThriveLensWslClusterState
     $wasRunning=$false
     if($state -ceq 'VALID'){
         Assert-ThriveLensLinuxPathPolicy -RequireLeaf
         $p=Get-ThriveLensWslPaths
-        $status=Invoke-ThriveLensDistro -Arguments @('/usr/sbin/runuser','-u','postgres','--',$p.PgCtl,'status','-D',$p.DataRoot)
+        $status=Invoke-ThriveLensGuardedDistro -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock -Arguments @('/usr/sbin/runuser','-u','postgres','--',$p.PgCtl,'status','-D',$p.DataRoot)
         $wasRunning=$status.ExitCode -eq 0
-        if($wasRunning){$stop=Invoke-ThriveLensDistro -TimeoutSeconds 45 -Arguments @('/usr/sbin/runuser','-u','postgres','--',$p.PgCtl,'stop','-D',$p.DataRoot,'-m','fast','-w','-t','30');if($stop.ExitCode -ne 0){throw 'POSTGRES_STOP_FAILED'}}
+        if($wasRunning){
+            $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
+        $stop=Invoke-ThriveLensGuardedDistro -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock -TimeoutSeconds 45 -Arguments @('/usr/sbin/runuser','-u','postgres','--',$p.PgCtl,'stop','-D',$p.DataRoot,'-m','fast','-w','-t','30')
+            if($stop.ExitCode -ne 0){throw 'POSTGRES_STOP_FAILED'}
+        }
     }
     elseif($state -ceq 'PARTIAL_OR_INVALID'){
         Assert-ThriveLensWslAbsent
@@ -641,10 +832,76 @@ function Resolve-ThriveLensChildOutcome {
     return [pscustomobject]@{Fatal=$false;Code='CHILD_BLOCKED';ExitCode=2}
 }
 
+function Resolve-ThriveLensStartChildExit {
+    param([Parameter(Mandatory)][int]$ExitCode)
+    if($ExitCode -eq 0){return [pscustomobject]@{Status='STARTED';Fatal=$false;FreshCleanupAllowed=$false;ExitCode=0}}
+    if($ExitCode -eq 2){return [pscustomobject]@{Status='BLOCKED';Fatal=$false;FreshCleanupAllowed=$false;ExitCode=2}}
+    if($ExitCode -eq 3){return [pscustomobject]@{Status='ERROR';Fatal=$true;FreshCleanupAllowed=$false;ExitCode=3;Code='RUNTIME_START_CHILD_FATAL'}}
+    return [pscustomobject]@{Status='ERROR';Fatal=$true;FreshCleanupAllowed=$false;ExitCode=3;Code='RUNTIME_START_CHILD_UNEXPECTED_EXIT'}
+}
+
+function Resolve-ThriveLensPreTokenStartObservation {
+    param(
+        [Parameter(Mandatory)][int]$StartExitCode,
+        [Parameter(Mandatory)][bool]$DistroAbsent,
+        [Parameter(Mandatory)][bool]$HostPortAbsent
+    )
+    $outcome=Resolve-ThriveLensStartChildExit -ExitCode $StartExitCode
+    if($StartExitCode -eq 2 -and $DistroAbsent -and $HostPortAbsent){
+        return [pscustomobject]@{Status='BLOCKED';Fatal=$false;ExitCode=2;Code='RUNTIME_START_PROBE_FAILED';CleanupVerified=$true}
+    }
+    $code=if($StartExitCode -eq 2){'RUNTIME_START_ABSENCE_UNVERIFIED'}elseif($null -ne $outcome.PSObject.Properties['Code']){[string]$outcome.Code}else{'RUNTIME_START_CHILD_UNEXPECTED_EXIT'}
+    return [pscustomobject]@{Status='ERROR';Fatal=$true;ExitCode=3;Code=$code;CleanupVerified=$false}
+}
+
+function Resolve-ThriveLensCleanupContainmentPolicy {
+    param(
+        [Parameter(Mandatory)][string]$FailureCode,
+        [Parameter(Mandatory)][bool]$SameTokenContainmentReverified
+    )
+    if($FailureCode -notmatch '^[A-Z0-9_]+$'){
+        return [pscustomobject]@{RequiresRecontainment=$true;AllowGuestCleanup=$false;Fatal=$true}
+    }
+    if($FailureCode -ceq 'WSL_GUARDED_COMMAND_CONTAINMENT_FAILED'){
+        return [pscustomobject]@{
+            RequiresRecontainment=$true
+            AllowGuestCleanup=$SameTokenContainmentReverified
+            Fatal=$true
+        }
+    }
+    return [pscustomobject]@{RequiresRecontainment=$false;AllowGuestCleanup=$true;Fatal=$false}
+}
+
+function Resolve-ThriveLensWrongPasswordProbe {
+    param(
+        [Parameter(Mandatory)][int]$ExitCode,
+        [AllowEmptyString()][string]$PrivateStandardOutput = '',
+        [AllowEmptyString()][string]$PrivateStandardError = '',
+        [Parameter(Mandatory)][bool]$ServerUsableAfterProbe
+    )
+    if($ExitCode -eq 0){throw 'WRONG_PASSWORD_WAS_ACCEPTED'}
+    if(-not [string]::IsNullOrEmpty($PrivateStandardOutput)){throw 'WRONG_PASSWORD_PROBE_UNEXPECTED_OUTPUT'}
+    if($ExitCode -ne 2){throw 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE'}
+    $expected='psql: error: connection to server at "127.0.0.1", port 55432 failed: FATAL:  password authentication failed for user "tl_bootstrap"'
+    $normalized=$PrivateStandardError -replace "`r`n","`n"
+    if($normalized.EndsWith("`n",[StringComparison]::Ordinal)){$normalized=$normalized.Substring(0,$normalized.Length-1)}
+    if($normalized -cne $expected){throw 'WRONG_PASSWORD_PROBE_UNRELATED_FAILURE'}
+    if(-not $ServerUsableAfterProbe){throw 'WRONG_PASSWORD_SERVER_USABILITY_UNVERIFIED'}
+    return [pscustomobject]@{Status='AUTHENTICATION_REJECTED';ExitCode=2}
+}
+
 function Stop-ThriveLensDistroAndVerify {
-    $contract=Get-ThriveLensWslContract;if([string]$contract.Wsl.distribution_name -cne 'ThriveLens-R0'){throw 'WSL_DISTRO_NAME_MISMATCH'}
-    $result=Invoke-ThriveLensWsl -Arguments @('--terminate','ThriveLens-R0') -TimeoutSeconds 15
-    if($result.ExitCode -ne 0){throw 'WSL_DISTRO_TERMINATE_FAILED'}
+    param([Parameter(Mandatory)]$IdentityToken,[Parameter(Mandatory)][Threading.Mutex]$LifecycleLock)
+    $null=Assert-ThriveLensLifecycleLockOwnership -LifecycleLock $LifecycleLock
+    $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
+    try{
+        $result=Invoke-ThriveLensWsl -Arguments @('--terminate','ThriveLens-R0') -TimeoutSeconds 15
+        if($result.ExitCode -ne 0){throw 'WSL_DISTRO_TERMINATE_FAILED'}
+    }
+    finally{
+        # A same-name replacement between authorization and mutation is fatal.
+        $null=Assert-ThriveLensWslCleanupIdentity -IdentityToken $IdentityToken -LifecycleLock $LifecycleLock
+    }
     Assert-ThriveLensDistroStopped
 }
 
@@ -664,23 +921,27 @@ function Enter-ThriveLensLifecycleLock {
         # The caller now owns the abandoned mutex. Every lifecycle caller
         # revalidates resource, distro, cluster, process, listener and path
         # state under this lock before mutation, enabling safe crash recovery.
+        $key=[Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($mutex);$script:HeldLifecycleLocks[$key]=[pscustomobject]@{Mutex=$mutex;OwnerThreadId=[Environment]::CurrentManagedThreadId}
         return $mutex
     }
     catch{if($null -ne $mutex){$mutex.Dispose()};throw}
+    $key=[Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($mutex);$script:HeldLifecycleLocks[$key]=[pscustomobject]@{Mutex=$mutex;OwnerThreadId=[Environment]::CurrentManagedThreadId}
     return $mutex
 }
 
 function Exit-ThriveLensLifecycleLock {
     param([Parameter(Mandatory)][Threading.Mutex]$Mutex)
-    try{$Mutex.ReleaseMutex()}finally{$Mutex.Dispose()}
+    $key=[Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Mutex)
+    $null=Assert-ThriveLensLifecycleLockOwnership -LifecycleLock $Mutex
+    try{$Mutex.ReleaseMutex()}finally{$null=$script:HeldLifecycleLocks.Remove($key);$Mutex.Dispose()}
 }
 
 Export-ModuleMember -Function @(
-    'Get-ThriveLensWslContract','Invoke-ThriveLensDistro',
-    'Assert-ThriveLensWslIdentity','Assert-ThriveLensWslCleanupIdentity','Assert-ThriveLensWslPackages','Get-ThriveLensWslPaths',
+    'Get-ThriveLensWslContract','Invoke-ThriveLensGuardedDistro',
+    'Get-ThriveLensWslCleanupIdentityToken','Compare-ThriveLensWslCleanupIdentityToken','Assert-ThriveLensWslIdentity','Assert-ThriveLensWslCleanupIdentity','Assert-ThriveLensWslPackages','Get-ThriveLensWslPaths',
     'Assert-ThriveLensDataInventoryGate','Test-ThriveLensWslClusterExists','Assert-ThriveLensClusterScramConfig','Resolve-ThriveLensClusterProbe','Get-ThriveLensWslClusterState',
     'Assert-ThriveLensWslInternalDisk','Resolve-ThriveLensLinuxTreeRootPolicy','Assert-ThriveLensLinuxTreePolicy','Assert-ThriveLensLinuxPathPolicy',
     'Assert-ThriveLensWslAbsent','Assert-ThriveLensWslLoopback','Assert-ThriveLensHostPortAbsent','Resolve-ThriveLensPortProxyMapping','Assert-ThriveLensNoHostPortProxy','Assert-ThriveLensHostLoopback',
-    'Stop-ThriveLensPostgresUnderLock','Stop-ThriveLensDistroAndVerify','Assert-ThriveLensDistroStopped','Resolve-ThriveLensChildOutcome',
+    'Stop-ThriveLensPostgresUnderLock','Stop-ThriveLensDistroAndVerify','Assert-ThriveLensDistroStopped','Resolve-ThriveLensChildOutcome','Resolve-ThriveLensStartChildExit','Resolve-ThriveLensPreTokenStartObservation','Resolve-ThriveLensCleanupContainmentPolicy','Resolve-ThriveLensWrongPasswordProbe',
     'Enter-ThriveLensLifecycleLock','Exit-ThriveLensLifecycleLock'
 )

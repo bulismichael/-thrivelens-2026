@@ -1,12 +1,12 @@
 # TL-R0-003 platform foundation
 
-Status: **dedicated WSL and exact packages present; PostgreSQL lifecycle not yet verified; Windows runtime rejected**
+Status: **dedicated WSL, exact packages, and initialized stopped cluster present; corrected PostgreSQL lifecycle verification pending; Windows runtime rejected**
 
 Observed: 2026-08-12
 
 Target host: Windows x86-64 with 7.87 GB physical memory; live mutation gates remeasure free memory instead of relying on a stale snapshot.
 
-The user authorized one exact project-only distro and signed-package transaction. The dedicated distro, exact nine-package closure, and protected bootstrap credential exist; the shared Ubuntu distribution was not targeted. No cluster/service/migration/API/backup is claimed, and Docker remains unused.
+The user authorized one exact project-only distro and signed-package transaction. The dedicated distro, exact nine-package closure, protected bootstrap credential, and initialized stopped SCRAM/checksum cluster exist; the shared Ubuntu distribution was not targeted. The first initialization was a noncanonical diagnostic run, so corrected runtime verification is still pending. No continuously running service, migration, API, or backup is claimed, and Docker remains unused.
 
 A lightweight read-only Windows measurement snapshot on 2026-08-12 observed `%LOCALAPPDATA%\ThriveLens\wsl\ThriveLens-R0\ext4.vhdx` at 2,131,755,008 bytes and the deduplicated aggregate counted root at 2,134,150,647 bytes. These values are point-in-time file-length/accounting observations, not a byte attestation of the installed Ubuntu image.
 
@@ -16,7 +16,7 @@ Reject the EDB portable Windows archive for ThriveLens runtime use. PostgreSQL 1
 
 The manifest therefore stores `null` for the archive digest, marks the portable candidate `REJECTED_FOR_RUNTIME`, and hard-disables its installer. The EDB interactive Windows installer is also `HARD_DISABLED`; it is not an alternate route around the archive decision. No Windows PostgreSQL artifact should be downloaded or accepted under TL-R0-003.
 
-The ADR-003 fallback is activated for the exact `ThriveLens-R0` distro only. Signed PGDG metadata, the full pinned/held package closure, dedicated counted storage, and the privacy inventory are present. Cluster initialization and runtime proof remain gated and sequential.
+The ADR-003 fallback is activated for the exact `ThriveLens-R0` distro only. Signed PGDG metadata, the full pinned/held package closure, dedicated counted storage, privacy inventory, and initialized stopped cluster are present. Corrected canonical runtime proof remains gated and sequential.
 
 ## Pinned artifacts and projections
 
@@ -24,7 +24,7 @@ The ADR-003 fallback is activated for the exact `ThriveLens-R0` distro only. Sig
 |---|---|---|---:|---:|---|
 | CPython | `python-3.13.15-amd64.exe` | [PSF release page](https://www.python.org/downloads/release/python-31315/), SHA-256 `edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403`, [Sigstore guidance](https://www.python.org/downloads/metadata/sigstore/), PSF Authenticode | 29,452,944 | 268,435,456-byte target only; TEMP/TMP and persistent cache unknown | **Installation disabled**; Sigstore recorded but not enforced; not downloaded |
 | Portable PostgreSQL | `postgresql-17.10-2-windows-x64-binaries.zip` | Official-page-linked EDB HTTPS artifact; Content-Length 333,927,270; Last-Modified `Thu, 11 Jun 2026 12:28:18 GMT`; no published digest/signature | 333,927,270 | Binary 805,306,368 bytes; initial cluster 134,217,728; synthetic backup 67,108,864; total below 1,006,632,960 | **Rejected for runtime**; download/install disabled |
-| WSL PGDG package transaction | Exact nine-package closure recorded in the manifest | Signed `noble-pgdg` metadata and pinned/held package versions | APT reported 48.4 MB, rounded | APT reported 201 MB additional installed space, rounded; 251,000,000-byte package-only ceiling | Packages present; no cluster/runtime claimed |
+| WSL PGDG package transaction | Exact nine-package closure recorded in the manifest | Signed `noble-pgdg` metadata and pinned/held package versions | APT reported 48.4 MB, rounded | APT reported 201 MB additional installed space, rounded; 251,000,000-byte package-only ceiling | Packages and initialized stopped cluster present; corrected runtime verification pending |
 | Compose PostgreSQL | `postgres:17.10-bookworm@sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923` | [Docker Official Images source of truth](https://github.com/docker-library/official-images/blob/master/library/postgres); linux/amd64 child manifest | 156,095,657 amd64 layer bytes | 536,870,912 runtime plus 134,217,728 data bytes | Inert descriptor; activation wrapper absent; engine accounting absent; image not pulled |
 
 The ceilings are projections, not measurements. Ubuntu publishes the selected WSL artifact at exactly 391,541,571 bytes and binds it in its signed SHA256SUMS metadata; because `wsl --web-download` did not retain that payload, the current VHD is explicitly not claimed to be byte-attested by the recorded hash. Python's 297,888,400-byte artifact-plus-target subtotal is explicitly **not** a worst case because installer TEMP/TMP scratch and persistent installer-cache size and paths are unknown. Consequently both Python and combined-backend worst-case projections are `null`, and Python installation is disabled before artifact or process use. PostgreSQL's rejected Windows artifact-plus-total projection is 1,340,560,230 bytes, but no Windows archive is opened or extracted. The WSL 251,000,000-byte ceiling is limited to the PostgreSQL package transaction: it combines bounded archive and installed-package allowances and excludes the distro/VHD and APT metadata. APT's `48.4 MB` archive and `201 MB` installed figures are rounded transaction output, not exact-byte evidence. Compose projects 827,184,297 bytes while remaining disabled for missing engine accounting. Any future mutation route must reject projected 85%/18 GiB breaches, retain a 512 MiB free-disk reserve, and run post-mutation accounting.
@@ -55,7 +55,7 @@ The preflight is intentionally stricter than the global warning:
 
 The integration owner added the dedicated WSL and cluster infrastructure rows to `docs/privacy/DATA_INVENTORY.md`; initialization verifies them before mutation. It also requires the exact protected password file with inheritance disabled, no Allow ACE for any principal other than the current user, LocalSystem, or BUILTIN Administrators, and explicit effective read access for the current user.
 
-The dormant initialization contract uses PostgreSQL's documented `--pwfile`, `--auth-host=scram-sha-256`, `--auth-local=scram-sha-256`, and `--data-checksums` controls. Start checks exact output from all four pinned tools, uses `pg_ctl` with a 30-second wait and binds only `127.0.0.1:55432`. Any post-start failure triggers bounded cleanup. Stop can report `STOPPED` or `ALREADY_STOPPED` only after exact binary-process and dedicated-port listener absence. The runtime test stops and verifies absence before PASS. See upstream [`initdb`](https://www.postgresql.org/docs/17/app-initdb.html) and [`pg_ctl`](https://www.postgresql.org/docs/17/app-pg-ctl.html).
+Initialization used PostgreSQL's documented `--pwfile`, `--auth-host=scram-sha-256`, `--auth-local=scram-sha-256`, and `--data-checksums` controls. Start checks exact output from all four pinned tools, uses `pg_ctl` with a 30-second wait and binds only `127.0.0.1:55432`. Any post-start failure triggers bounded cleanup. Stop can report `STOPPED` or `ALREADY_STOPPED` only after exact binary-process and dedicated-port listener absence. Every forced distro termination additionally requires the held lifecycle mutex and an in-memory host-only token matching the canonical Lxss GUID/name/version/BasePath plus VHD file identity immediately before and after termination; lock failure or identity drift never falls back to unguarded termination. WSL 2.6.3 offers only name-targeted termination, so a hostile same-user/OS-control replacement in the irreducible precheck-to-command interval remains a documented residual that post-validation detects but cannot make atomic. The runtime test accepts a wrong-password result only when a bounded private `LC_ALL=C` stderr buffer exactly classifies PostgreSQL's `tl_bootstrap` password rejection, then proves the same server remains usable with the protected credential before stopping and verifying absence. See upstream [`initdb`](https://www.postgresql.org/docs/17/app-initdb.html) and [`pg_ctl`](https://www.postgresql.org/docs/17/app-pg-ctl.html).
 
 ## Compose boundary
 
@@ -96,7 +96,7 @@ The TL-R0-004 handoff becomes available only after TL-R0-003 is VERIFIED with th
 
 ## Current blockers and manual intervention
 
-1. The PostgreSQL cluster is not initialized and the two-cycle runtime proof has not run; TL-R0-003 therefore remains unverified.
+1. The initialized stopped PostgreSQL cluster exists, but the corrected canonical two-cycle runtime proof has not yet run; TL-R0-003 therefore remains unverified.
 2. Python installation remains disabled because scratch/cache ceilings and counted paths are undefined.
 3. Compose remains intentionally inert: no activation wrapper or runnable service exists and engine storage accounting is not configured.
 4. Destructive WSL rollback is not authorized. Exact-target removal requires a separate human confirmation.
