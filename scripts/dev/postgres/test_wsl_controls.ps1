@@ -242,6 +242,25 @@ function Test-ThriveLensStartAdapterContract([string]$Source){
    $Source -match 'post_mutation_resource_gate_verified\s*=\s*\$finalResourceGateVerified\s*-and\s*-not\s*\$finalResourceGateFailed')
  }catch{return $false}
 }
+function Test-ThriveLensInterCyclePolicyContract([string]$Source){
+ try{
+  $parsed=Get-ThriveLensParsedSource -Source $Source
+  if($parsed.Errors.Count -ne 0){return $false}
+  $helper=Get-ThriveLensFunctionAst -Ast $parsed.Ast -Name 'Get-ThriveLensInterCycleMemoryTargetBytes'
+  if($null -eq $helper){return $false}
+  $parameters=@($helper.Body.ParamBlock.Parameters|ForEach-Object{$_.Name.VariablePath.UserPath})
+  if(($parameters -join ',') -cne 'Manifest'){return $false}
+  $body=$helper.Extent.Text
+  return ($body -notmatch '(?i)WSL|Get-ThriveLensManifest|Invoke-|Start-|Stop-|Remove-|Set-' -and
+   $body -match "'runtime_minimum_free_memory_bytes'\s*,\s*'install_minimum_free_memory_bytes'" -and
+   $body -match '\$policyValues\.Count\s*-ne\s*1' -and
+   $body -match '\$candidateValues\.Count\s*-ne\s*1' -and
+   $body -match '\$candidateValues\[0\]\s*-isnot\s*\[int64\]' -and
+   $body -notmatch 'TryParse|Convert\]::ToString' -and $body -match '\$candidateBytes\s*-le\s*0' -and
+   $body -match 'return\s+\[Math\]::Max\(\$validatedValues\[0\],\s*\$validatedValues\[1\]\)' -and
+   $body -match "throw\s+'RUNTIME_MEMORY_POLICY_INVALID'")
+ }catch{return $false}
+}
 function Test-ThriveLensRuntimeAdapterContract([string]$Source){
  try{
   $parsed=Get-ThriveLensParsedSource -Source $Source
@@ -251,7 +270,10 @@ function Test-ThriveLensRuntimeAdapterContract([string]$Source){
   $contracts=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Get-ThriveLensWslContract'
   $paths=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Get-ThriveLensWslPaths'
   $tokens=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Get-ThriveLensWslCleanupIdentityToken'
-  if($cycles.Count -ne 1 -or $cores.Count -ne 1 -or $contracts.Count -ne 1 -or $paths.Count -ne 1 -or $tokens.Count -ne 1){return $false}
+  $targets=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Get-ThriveLensInterCycleMemoryTargetBytes'
+  $settles=Get-ThriveLensCommandAsts -Ast $parsed.Ast -Name 'Wait-ThriveLensInterCycleMemorySettle'
+  if($cycles.Count -ne 1 -or $cores.Count -ne 1 -or $contracts.Count -ne 1 -or $paths.Count -ne 1 -or $tokens.Count -ne 1 -or $targets.Count -ne 1 -or $settles.Count -ne 1 -or
+     -not (Test-ThriveLensInterCyclePolicyContract -Source $Source)){return $false}
   $cycle=$cycles[0]
   foreach($call in @($cores)+@($contracts)+@($paths)+@($tokens)){if($call.Extent.StartOffset -le $cycle.Extent.StartOffset -or $call.Extent.EndOffset -ge $cycle.Extent.EndOffset){return $false}}
   $lockIndex=$Source.IndexOf('$probeLifecycleLock = Enter-ThriveLensLifecycleLock',$cycle.Extent.StartOffset,[StringComparison]::Ordinal)
@@ -266,18 +288,25 @@ function Test-ThriveLensRuntimeAdapterContract([string]$Source){
   $successHostAbsence=$Source.IndexOf('Assert-ThriveLensHostPortAbsent -Paths $leasedPaths -Contract $leasedContract',$successDistroAbsence,[StringComparison]::Ordinal)
   $successFinalGate=$Source.IndexOf('Invoke-ThriveLensResourceGate -Manifest $manifest',$successHostAbsence,[StringComparison]::Ordinal)
   $completed=$Source.IndexOf('$completedCycles++',$successForce,[StringComparison]::Ordinal)
-  $releaseLease=$Source.IndexOf('Exit-ThriveLensConfigurationLease -Lease $configurationLease',$completed,[StringComparison]::Ordinal)
+  $target=$targets[0].Extent.StartOffset
+  $releaseLease=$Source.IndexOf('Exit-ThriveLensConfigurationLease -Lease $configurationLease',$target,[StringComparison]::Ordinal)
   $clearLease=$Source.IndexOf('$configurationLease = $null',$releaseLease,[StringComparison]::Ordinal)
   $releaseLock=$Source.IndexOf('Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock',$clearLease,[StringComparison]::Ordinal)
   $clearToken=$Source.IndexOf('$probeIdentityToken = $null',$releaseLock,[StringComparison]::Ordinal)
-  $settle=$Source.IndexOf('Wait-ThriveLensInterCycleMemorySettle -MinimumFreeMemoryBytes $minimumFreeMemoryBytes',$clearToken,[StringComparison]::Ordinal)
-  if(-not ($lockIndex -ge 0 -and $lockIndex -lt $leaseIndex -and $leaseIndex -lt $contractIndex -and $contractIndex -lt $pathsIndex -and $pathsIndex -lt $tokenIndex -and $tokenIndex -lt $coreIndex -and $coreIndex -lt $firstProbe -and $firstProbe -lt $identityProbe -and $identityProbe -lt $successStop -and $successStop -lt $successForce -and $successForce -lt $successDistroAbsence -and $successDistroAbsence -lt $successHostAbsence -and $successHostAbsence -lt $successFinalGate -and $successFinalGate -lt $completed -and $completed -lt $releaseLease -and $releaseLease -lt $clearLease -and $clearLease -lt $releaseLock -and $releaseLock -lt $clearToken -and $clearToken -lt $settle -and $settle -lt $cycle.Extent.EndOffset)){return $false}
+  $clearContract=$Source.IndexOf('$leasedContract = $null',$clearToken,[StringComparison]::Ordinal)
+  $clearPaths=$Source.IndexOf('$leasedPaths = $null',$clearContract,[StringComparison]::Ordinal)
+  $clearManifest=$Source.IndexOf('$manifest = $null',$clearPaths,[StringComparison]::Ordinal)
+  $settle=$settles[0].Extent.StartOffset
+  $continue=$Source.IndexOf('continue',$settles[0].Extent.EndOffset,[StringComparison]::Ordinal)
+  $postSettleCommands=@($cycle.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst]},$true)|Where-Object{$_.Extent.StartOffset -ge $settles[0].Extent.EndOffset -and $_.Extent.EndOffset -le $continue})
+  if(-not ($lockIndex -ge 0 -and $lockIndex -lt $leaseIndex -and $leaseIndex -lt $contractIndex -and $contractIndex -lt $pathsIndex -and $pathsIndex -lt $tokenIndex -and $tokenIndex -lt $coreIndex -and $coreIndex -lt $firstProbe -and $firstProbe -lt $identityProbe -and $identityProbe -lt $successStop -and $successStop -lt $successForce -and $successForce -lt $successDistroAbsence -and $successDistroAbsence -lt $successHostAbsence -and $successHostAbsence -lt $successFinalGate -and $successFinalGate -lt $completed -and $completed -lt $target -and $target -lt $releaseLease -and $releaseLease -lt $clearLease -and $clearLease -lt $releaseLock -and $releaseLock -lt $clearToken -and $clearToken -lt $clearContract -and $clearContract -lt $clearPaths -and $clearPaths -lt $clearManifest -and $clearManifest -lt $settle -and $settle -lt $continue -and $continue -lt $cycle.Extent.EndOffset -and $postSettleCommands.Count -eq 0)){return $false}
   if($contracts[0].Extent.Text -notmatch '-ConfigurationLease\s+\$configurationLease' -or
      $paths[0].Extent.Text -notmatch '-Contract\s+\$leasedContract' -or
      $tokens[0].Extent.Text -notmatch '-Contract\s+\$leasedContract' -or
      $Source -notmatch '\$manifest\s*=\s*\$leasedContract\.Manifest' -or
-     $Source -notmatch '\$minimumFreeMemoryBytes\s*=\s*\[int64\]\$manifest\.resource_policy\.runtime_minimum_free_memory_bytes' -or
-     $Source -match '\$minimumFreeMemoryBytes\s*=\s*(?:\[int64\])?1073741824'){return $false}
+     $targets[0].Extent.Text -notmatch '-Manifest\s+\$manifest' -or
+     $settles[0].Extent.Text -notmatch '-MinimumFreeMemoryBytes\s+\$interCycleMemoryTargetBytes' -or
+     $Source -match '\$interCycleMemoryTargetBytes\s*=\s*(?:\[int64\])?(?:1073741824|2147483648)'){return $false}
   foreach($call in @(Get-ThriveLensCommandAsts -Ast $cycle -Name 'Assert-ThriveLensWslCleanupIdentity')){
    if($call.Extent.Text -notmatch '-IdentityToken\s+\$probeIdentityToken' -or $call.Extent.Text -notmatch '-LifecycleLock\s+\$probeLifecycleLock' -or $call.Extent.Text -notmatch '-Contract\s+\$leasedContract'){return $false}
   }
@@ -373,6 +402,23 @@ function Invoke-ThriveLensStartCoreHarness([string]$Definition,[string]$Mode){
   }
  }
  try{return & $module {param($Case)Invoke-CoreCase -Case $Case} $Mode}finally{Remove-Module $module -Force -ErrorAction SilentlyContinue}
+}
+function Invoke-ThriveLensInterCyclePolicyHarness([string]$Definition,$RuntimeValue,$InstallValue){
+ $module=New-Module -ArgumentList $Definition -ScriptBlock {
+  param([string]$PolicyDefinition)
+  . ([scriptblock]::Create($PolicyDefinition))
+ }
+ try{
+  return & $module {
+   param($RuntimeValue,$InstallValue)
+   $policy=[pscustomobject]@{}
+   $policy|Add-Member NoteProperty runtime_minimum_free_memory_bytes $RuntimeValue
+   $policy|Add-Member NoteProperty install_minimum_free_memory_bytes $InstallValue
+   $code=$null;$value=$null
+   try{$value=Get-ThriveLensInterCycleMemoryTargetBytes -Manifest ([pscustomobject]@{resource_policy=$policy})}catch{$code=[string]$_.Exception.Message}
+   [pscustomobject]@{Value=$value;Code=$code}
+  } $RuntimeValue $InstallValue
+ }finally{Remove-Module $module -Force -ErrorAction SilentlyContinue}
 }
 function Invoke-ThriveLensStartAdapterHarness([string]$Source,[string]$Mode){
  $executable=[regex]::Replace($Source,'(?m)^\s*Import-Module[^\r\n]*\r?\n','')
@@ -572,10 +618,10 @@ try{
  $settleFunctions=@($runtimeModuleAst.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Wait-ThriveLensInterCycleMemorySettle'},$true))
  A ($runtimeModuleParseErrors.Count -eq 0 -and $settleFunctions.Count -eq 1) 'INTER_CYCLE_MEMORY_HELPER_AST_PRESENT'
  $settleDefinition=if($settleFunctions.Count -eq 1){$settleFunctions[0].Extent.Text}else{''}
- A ($settleDefinition -match '\$timeoutMilliseconds\s*=\s*30000' -and $settleDefinition -match '\$sampleIntervalMilliseconds\s*=\s*1000' -and $settleDefinition -match '\$requiredConsecutiveSamples\s*=\s*3') 'INTER_CYCLE_MEMORY_FIXED_POLICY'
+ A ($settleDefinition -match '\$timeoutMilliseconds\s*=\s*90000' -and $settleDefinition -notmatch '\$timeoutMilliseconds\s*=\s*30000' -and $settleDefinition -match '\$sampleIntervalMilliseconds\s*=\s*1000' -and $settleDefinition -match '\$requiredConsecutiveSamples\s*=\s*3') 'INTER_CYCLE_MEMORY_FIXED_POLICY'
  A ($settleDefinition -match 'Get-ThriveLensFreeMemoryBytes' -and $settleDefinition -match '\[Diagnostics\.Stopwatch\]::StartNew\(\)' -and $settleDefinition -match 'Start-Sleep\s+-Milliseconds' -and $settleDefinition -notmatch '(?i)WSL|Stop-Process|Kill\(|Invoke-|Remove-|Set-|New-Item') 'INTER_CYCLE_MEMORY_HOST_ONLY'
- $boundedSettleDefinition=$settleDefinition.Replace('$timeoutMilliseconds = 30000','$timeoutMilliseconds = 2000').Replace('$sampleIntervalMilliseconds = 1000','$sampleIntervalMilliseconds = 1')
- $zeroTimeoutSettleDefinition=$settleDefinition.Replace('$timeoutMilliseconds = 30000','$timeoutMilliseconds = 0').Replace('$sampleIntervalMilliseconds = 1000','$sampleIntervalMilliseconds = 1')
+ $boundedSettleDefinition=$settleDefinition.Replace('$timeoutMilliseconds = 90000','$timeoutMilliseconds = 2000').Replace('$sampleIntervalMilliseconds = 1000','$sampleIntervalMilliseconds = 1')
+ $zeroTimeoutSettleDefinition=$settleDefinition.Replace('$timeoutMilliseconds = 90000','$timeoutMilliseconds = 0').Replace('$sampleIntervalMilliseconds = 1000','$sampleIntervalMilliseconds = 1')
  A ($boundedSettleDefinition -cne $settleDefinition -and $boundedSettleDefinition -match '\$timeoutMilliseconds\s*=\s*2000(?:\D|$)' -and $boundedSettleDefinition -match '\$sampleIntervalMilliseconds\s*=\s*1(?:\D|$)' -and $zeroTimeoutSettleDefinition -match '\$timeoutMilliseconds\s*=\s*0(?:\D|$)') 'INTER_CYCLE_MEMORY_TEST_DEADLINE_BOUNDED'
  $settleTestModuleScript={
   param([string]$Definition)
@@ -811,6 +857,12 @@ try{
  $runtimeTokens=$null;$runtimeParseErrors=$null;$runtimeAst=[Management.Automation.Language.Parser]::ParseInput($runtimeTest,[ref]$runtimeTokens,[ref]$runtimeParseErrors)
  $pseudoFinallyCommands=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'finally'},$true))
  A ($runtimeParseErrors.Count -eq 0 -and $pseudoFinallyCommands.Count -eq 0) 'RUNTIME_FINALLY_AST_BOUND'
+ $policyFunctions=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-ThriveLensInterCycleMemoryTargetBytes'},$true));$policyDefinition=if($policyFunctions.Count -eq 1){$policyFunctions[0].Extent.Text}else{''}
+ A (Test-ThriveLensInterCyclePolicyContract -Source $runtimeTest) 'INTER_CYCLE_POLICY_EXACT_MAX_CONTRACT'
+ $policyInstallMax=Invoke-ThriveLensInterCyclePolicyHarness $policyDefinition ([int64]1024) ([int64]2048);A ($null -eq $policyInstallMax.Code -and $policyInstallMax.Value -is [int64] -and $policyInstallMax.Value -eq 2048) 'INTER_CYCLE_POLICY_INSTALL_MAX'
+ $policyRuntimeMax=Invoke-ThriveLensInterCyclePolicyHarness $policyDefinition ([int64]4096) ([int64]2048);A ($null -eq $policyRuntimeMax.Code -and $policyRuntimeMax.Value -eq 4096) 'INTER_CYCLE_POLICY_RUNTIME_MAX'
+ foreach($invalidPolicyCase in @(@($true,[int64]2048),@($null,[int64]2048),@('-1',[int64]2048),@([double]2048,[int64]2048),@([decimal]2048,[int64]2048),@([int64]0,[int64]2048),@([int64]-1,[int64]2048))){$invalidPolicy=Invoke-ThriveLensInterCyclePolicyHarness $policyDefinition $invalidPolicyCase[0] $invalidPolicyCase[1];A ($invalidPolicy.Code -ceq 'RUNTIME_MEMORY_POLICY_INVALID' -and $null -eq $invalidPolicy.Value) 'INTER_CYCLE_POLICY_INVALID_SOURCE_FAILS_CLOSED'}
+ $multiplePolicy=Invoke-ThriveLensInterCyclePolicyHarness -Definition $policyDefinition -RuntimeValue ([object[]]@([int64]1024,[int64]2048)) -InstallValue ([int64]2048);A ($multiplePolicy.Code -ceq 'RUNTIME_MEMORY_POLICY_INVALID' -and $null -eq $multiplePolicy.Value) 'INTER_CYCLE_POLICY_MULTIPLE_SOURCE_FAILS_CLOSED'
  $runtimeImportFailure=Invoke-ThriveLensRuntimeImportFailureHarness -Source $runtimeTest
  A ($null -ne $runtimeImportFailure -and $runtimeImportFailure.schema_version -eq 2 -and $runtimeImportFailure.status -ceq 'ERROR' -and $runtimeImportFailure.code -ceq 'RUNTIME_TEST_INTERNAL_ERROR' -and $runtimeImportFailure.original_code -ceq 'RUNTIME_TEST_INTERNAL_ERROR' -and -not $runtimeImportFailure.cleanup_required -and -not $runtimeImportFailure.cleanup_verified -and -not $runtimeImportFailure.guest_cleanup_attempted -and -not $runtimeImportFailure.forced_termination_attempted -and -not $runtimeImportFailure.post_mutation_resource_gate_verified -and -not $runtimeImportFailure.configuration_lease_release_attempted -and -not $runtimeImportFailure.lifecycle_lock_release_attempted -and ($runtimeImportFailure|ConvertTo-Json -Compress) -notmatch 'synthetic|private|import failure') 'RUNTIME_IMPORT_FAILURE_CLOSED_WITHOUT_MODULE_CALLS_OR_RAW_TEXT'
  $runtimeInitialDrain=Invoke-ThriveLensRuntimeInitialDrainHarness -Source $runtimeTest
@@ -927,6 +979,18 @@ try{
  $wrongClears=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$wrongAuthFile' -and $node.Right.Extent.Text -ceq '$null'},$true)|Where-Object{$_.Extent.StartOffset -gt $wrongInstallAst.Extent.StartOffset})
  A ($wrongRemoveCalls.Count -eq 1 -and $wrongClassifierCalls.Count -eq 1 -and $wrongClears.Count -ge 1 -and $wrongInstallAst.Extent.StartOffset -lt $wrongProbeAst.Extent.StartOffset -and $wrongProbeAst.Extent.StartOffset -lt $wrongRemoveCalls[0].Extent.StartOffset -and $wrongRemoveCalls[0].Extent.StartOffset -lt $wrongClassifierCalls[0].Extent.StartOffset -and $wrongClassifierCalls[0].Extent.StartOffset -lt $wrongClears[0].Extent.StartOffset -and $runtimeTest.Substring($wrongInstallAst.Extent.StartOffset,$wrongClassifierCalls[0].Extent.StartOffset-$wrongInstallAst.Extent.StartOffset) -notmatch '\$wrongAuthFile\s*=\s*\$null') 'RUNTIME_WRONG_PASSWORD_PATH_PRIVATE_LIFETIME'
  A (Test-ThriveLensRuntimeAdapterContract -Source $runtimeTest) 'RUNTIME_IN_PROCESS_TRANSACTION_CONTRACT'
+ $policyMaxMutation=Replace-ThriveLensTestSourceOnce -Source $runtimeTest -Old 'return [Math]::Max($validatedValues[0], $validatedValues[1])' -New 'return [Math]::Min($validatedValues[0], $validatedValues[1])'
+ A ((Test-ThriveLensSourceParses -Source $policyMaxMutation) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $policyMaxMutation)) 'MUTATION_KILLS_INTER_CYCLE_POLICY_MIN'
+ $policyRuntimeOnlyMutation=Replace-ThriveLensTestSourceOnce -Source $runtimeTest -Old 'return [Math]::Max($validatedValues[0], $validatedValues[1])' -New 'return $validatedValues[0]'
+ A ((Test-ThriveLensSourceParses -Source $policyRuntimeOnlyMutation) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $policyRuntimeOnlyMutation)) 'MUTATION_KILLS_INTER_CYCLE_POLICY_RUNTIME_ONLY'
+ $policyHardcodeMutation=Replace-ThriveLensTestSourceOnce -Source $runtimeTest -Old 'return [Math]::Max($validatedValues[0], $validatedValues[1])' -New 'return [int64]2147483648'
+ A ((Test-ThriveLensSourceParses -Source $policyHardcodeMutation) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $policyHardcodeMutation)) 'MUTATION_KILLS_INTER_CYCLE_POLICY_HARDCODE'
+ $policyTypeMutation=Replace-ThriveLensTestSourceOnce -Source $runtimeTest -Old '$candidateValues[0] -isnot [int64]' -New '$candidateValues[0] -is [bool]'
+ A ((Test-ThriveLensSourceParses -Source $policyTypeMutation) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $policyTypeMutation)) 'MUTATION_KILLS_INTER_CYCLE_POLICY_NON_INT64_ACCEPTANCE'
+ $removedContractClear=Replace-ThriveLensTestSourceOccurrence -Source $runtimeTest -Old '$leasedContract = $null' -New '$null = $leasedContract' -Occurrence 3
+ A ((Test-ThriveLensSourceParses -Source $removedContractClear) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $removedContractClear)) 'MUTATION_KILLS_INTER_CYCLE_CONTRACT_CLEAR_REMOVAL'
+ $removedPathsClear=Replace-ThriveLensTestSourceOccurrence -Source $runtimeTest -Old '$leasedPaths = $null' -New '$null = $leasedPaths' -Occurrence 3
+ A ((Test-ThriveLensSourceParses -Source $removedPathsClear) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $removedPathsClear)) 'MUTATION_KILLS_INTER_CYCLE_PATHS_CLEAR_REMOVAL'
  $runtimeCoreCalls=Get-ThriveLensCommandAsts -Ast $runtimeAst -Name 'Invoke-ThriveLensPostgresStartUnderLock';$runtimeTokenCalls=Get-ThriveLensCommandAsts -Ast $runtimeAst -Name 'Get-ThriveLensWslCleanupIdentityToken';$settleCalls=Get-ThriveLensCommandAsts -Ast $runtimeAst -Name 'Wait-ThriveLensInterCycleMemorySettle'
  A ($runtimeCoreCalls.Count -eq 1 -and $runtimeTokenCalls.Count -eq 1 -and $settleCalls.Count -eq 1) 'RUNTIME_ONE_CORE_AND_TOKEN_PER_LEXICAL_CYCLE'
  A ($runtimeTest -notmatch '(?i)pwsh(?:\.exe)?\s+.*(?:preflight|start|stop)\.ps1|Start-Process|Resolve-ThriveLens(?:ChildOutcome|StartChildExit|PreTokenStartObservation)') 'RUNTIME_NO_CHILD_RUNNER_PRETOKEN_OR_FRESH_TOKEN_BRANCH'
@@ -1012,8 +1076,6 @@ try{
  $runtimeCycleGuard=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.IfStatementAst] -and @($node.Clauses|Where-Object{$_.Item1.Extent.Text -match '^\s*-not\s+\$cycleComplete\s*$'}).Count -gt 0},$true))[0]
  $runtimeGuardMutation=Replace-ThriveLensTestAstExtent -Source $runtimeTest -Extent $runtimeCycleGuard.Clauses[0].Item1.Extent -New '$cycleComplete'
  A ((Test-ThriveLensSourceParses -Source $runtimeGuardMutation) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $runtimeGuardMutation)) 'MUTATION_KILLS_RUNTIME_COMPLETED_CYCLE_GUARD_POLARITY'
- $runtimeHardcodedMutation=Replace-ThriveLensTestSourceOnce -Source $runtimeTest -Old '$minimumFreeMemoryBytes = [int64]$manifest.resource_policy.runtime_minimum_free_memory_bytes' -New '$minimumFreeMemoryBytes = [int64]1073741824'
- A ((Test-ThriveLensSourceParses -Source $runtimeHardcodedMutation) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $runtimeHardcodedMutation)) 'MUTATION_KILLS_RUNTIME_HARDCODED_SETTLE_THRESHOLD'
  $runtimePolicyRereadMutation=Replace-ThriveLensTestSourceOnce -Source $runtimeTest -Old 'Get-ThriveLensWslContract -ConfigurationLease $configurationLease' -New 'Get-ThriveLensWslContract'
  A ((Test-ThriveLensSourceParses -Source $runtimePolicyRereadMutation) -and -not (Test-ThriveLensRuntimeAdapterContract -Source $runtimePolicyRereadMutation)) 'MUTATION_KILLS_RUNTIME_POLICY_REREAD'
  $runtimeCycle=@($runtimeAst.FindAll({param($node)$node -is [Management.Automation.Language.ForEachStatementAst] -and $node.Variable.VariablePath.UserPath -ceq 'cycle'},$true))[0]

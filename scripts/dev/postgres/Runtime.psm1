@@ -902,7 +902,7 @@ function Wait-ThriveLensInterCycleMemorySettle {
         throw 'RESOURCE_INTER_CYCLE_MEMORY_MEASUREMENT_UNAVAILABLE'
     }
 
-    $timeoutMilliseconds = 30000
+    $timeoutMilliseconds = 90000
     $sampleIntervalMilliseconds = 1000
     $requiredConsecutiveSamples = 3
     $consecutiveSamples = 0

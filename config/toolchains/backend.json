@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "task_id": "TL-R0-003",
-  "status": "WSL_POSTGRES_CLUSTER_INITIALIZED_RUNTIME_VERIFICATION_PENDING",
+  "status": "WSL_POSTGRES_CLUSTER_INITIALIZED_RUNTIME_PASS_REQUIRES_EXTERNAL_TASK_EVIDENCE",
   "target": {
     "os": "windows",
     "architecture": "x86_64",
@@ -106,7 +106,7 @@
   },
   "wsl_fallback": {
     "trigger": "Required because the EDB portable Windows archive is rejected for runtime.",
-    "status": "ACTIVATED_CLUSTER_INITIALIZED_RUNTIME_VERIFICATION_PENDING",
+    "status": "ACTIVATED_CLUSTER_INITIALIZED_RUNTIME_PASS_REQUIRES_EXTERNAL_TASK_EVIDENCE",
     "human_system_authority": "AUTHORIZED_2026-08-12_FOR_DEDICATED_DISTRO_ONLY",
     "wsl_version": "2.6.3.0",
     "distribution_name": "ThriveLens-R0",

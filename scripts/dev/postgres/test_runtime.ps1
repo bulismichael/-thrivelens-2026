@@ -173,6 +173,41 @@ function Get-ThriveLensPrivateClusterIdentityFingerprint {
     }
 }
 
+function Get-ThriveLensInterCycleMemoryTargetBytes {
+    param([Parameter(Mandatory)]$Manifest)
+
+    try {
+        $policyValues = @($Manifest.resource_policy)
+        if ($policyValues.Count -ne 1 -or $null -eq $policyValues[0] -or
+            $policyValues[0] -is [bool]) {
+            throw 'INVALID_MEMORY_POLICY'
+        }
+
+        $validatedValues = [int64[]]::new(2)
+        $fieldNames = @(
+            'runtime_minimum_free_memory_bytes',
+            'install_minimum_free_memory_bytes'
+        )
+        for ($index = 0; $index -lt $fieldNames.Count; $index++) {
+            $property = $policyValues[0].PSObject.Properties[$fieldNames[$index]]
+            $candidateValues = if ($null -eq $property) { @() } else { @($property.Value) }
+            if ($candidateValues.Count -ne 1 -or $null -eq $candidateValues[0] -or
+                $candidateValues[0] -isnot [int64]) {
+                throw 'INVALID_MEMORY_POLICY'
+            }
+            $candidateBytes = [int64]$candidateValues[0]
+            if ($candidateBytes -le 0) {
+                throw 'INVALID_MEMORY_POLICY'
+            }
+            $validatedValues[$index] = $candidateBytes
+        }
+        return [Math]::Max($validatedValues[0], $validatedValues[1])
+    }
+    catch {
+        throw 'RUNTIME_MEMORY_POLICY_INVALID'
+    }
+}
+
 $started = $false
 $failureExitCode = 2
 $credentialCleanupFatal = $false
@@ -217,6 +252,7 @@ $finalResourceGateFailed = $false
 $modulesReady = $false
 $configurationFingerprint = $null
 $clusterIdentityFingerprint = $null
+$interCycleMemoryTargetBytes = [int64]0
 $sameClusterIdentityVerified = $false
 $completedCycles = 0
 $proofCounts = [ordered]@{
@@ -311,8 +347,6 @@ try {
         if ($actual -cne $configuredPasswordFile) {
             throw 'PASSWORD_FILE_PATH_MISMATCH'
         }
-        $minimumFreeMemoryBytes = [int64]$manifest.resource_policy.runtime_minimum_free_memory_bytes
-
         $null = Invoke-ThriveLensPostgresStartUnderLock `
             -ConfigurationLease $configurationLease `
             -IdentityToken $probeIdentityToken `
@@ -601,6 +635,14 @@ try {
         }
         $completedCycles++
 
+        if ($cycle -eq 1) {
+            # Capture the stricter leased policy value before disposing the
+            # configuration authority. The following wait receives only this
+            # validated scalar and cannot re-read configuration.
+            $interCycleMemoryTargetBytes = Get-ThriveLensInterCycleMemoryTargetBytes `
+                -Manifest $manifest
+        }
+
         $null = Assert-ThriveLensConfigurationLease -Lease $configurationLease
         $currentLeaseIntegrityVerified = $true
         try {
@@ -633,8 +675,16 @@ try {
             throw 'RUNTIME_LOCK_RELEASE_FAILED'
         }
 
+        # Successful disposal ends every configuration and WSL observation
+        # authority for this cycle. In particular, an inter-cycle wait failure
+        # reaches catch with no contract or paths that could authorize a probe.
+        $leasedContract = $null
+        $leasedPaths = $null
+        $manifest = $null
+
         if ($cycle -eq 1) {
-            Wait-ThriveLensInterCycleMemorySettle -MinimumFreeMemoryBytes $minimumFreeMemoryBytes
+            Wait-ThriveLensInterCycleMemorySettle `
+                -MinimumFreeMemoryBytes $interCycleMemoryTargetBytes
             continue
         }
     }

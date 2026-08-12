@@ -67,8 +67,8 @@ try {
     Assert-Condition ([int]$manifest.postgresql.port -eq 55432) 'POSTGRES_PORT'
     Assert-Condition ([int64]$manifest.postgresql.maximum_total_postgresql_bytes -lt 1073741824) 'POSTGRES_ALLOCATION'
 
-    Assert-Condition ([string]$manifest.status -ceq 'WSL_POSTGRES_CLUSTER_INITIALIZED_RUNTIME_VERIFICATION_PENDING') 'BACKEND_STATUS'
-    Assert-Condition ([string]$manifest.wsl_fallback.status -ceq 'ACTIVATED_CLUSTER_INITIALIZED_RUNTIME_VERIFICATION_PENDING') 'WSL_STATUS'
+    Assert-Condition ([string]$manifest.status -ceq 'WSL_POSTGRES_CLUSTER_INITIALIZED_RUNTIME_PASS_REQUIRES_EXTERNAL_TASK_EVIDENCE') 'BACKEND_STATUS'
+    Assert-Condition ([string]$manifest.wsl_fallback.status -ceq 'ACTIVATED_CLUSTER_INITIALIZED_RUNTIME_PASS_REQUIRES_EXTERNAL_TASK_EVIDENCE') 'WSL_STATUS'
     Assert-Condition ([string]$manifest.wsl_fallback.human_system_authority -ceq 'AUTHORIZED_2026-08-12_FOR_DEDICATED_DISTRO_ONLY') 'WSL_HUMAN_AUTHORITY'
     Assert-Condition ([string]$manifest.wsl_fallback.distribution_name -ceq 'ThriveLens-R0') 'WSL_DISTRO_NAME'
     Assert-Condition ([string]$manifest.wsl_fallback.distribution_install_root -ceq '%LOCALAPPDATA%\ThriveLens\wsl\ThriveLens-R0') 'WSL_DISTRO_ROOT'
