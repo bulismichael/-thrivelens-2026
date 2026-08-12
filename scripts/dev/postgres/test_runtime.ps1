@@ -90,6 +90,60 @@ function Assert-ThriveLensAuthenticatedScalar {
     }
 }
 
+function Invoke-ThriveLensInterCycleBoundary {
+    param(
+        [Parameter(Mandatory)][int64]$MinimumFreeMemoryBytes,
+        [Parameter(Mandatory)][ref]$LifecycleLock,
+        [Parameter(Mandatory)][ref]$IdentityToken
+    )
+
+    $continueToNextCycle = $false
+    $originalCode = $null
+    $originalExitCode = 0
+    $lockReleaseFailed = $false
+    try {
+        if ($null -eq $LifecycleLock.Value -or $null -eq $IdentityToken.Value) {
+            throw 'RUNTIME_TEST_INTERNAL_ERROR'
+        }
+        Wait-ThriveLensInterCycleMemorySettle -MinimumFreeMemoryBytes $MinimumFreeMemoryBytes
+        $continueToNextCycle = $true
+    }
+    catch {
+        $originalCode = Resolve-ThriveLensRuntimePublicCode -Code ([string]$_.Exception.Message)
+        $originalExitCode = if ($originalCode -cin @(
+            'RESOURCE_INTER_CYCLE_MEMORY_NOT_SETTLED',
+            'RESOURCE_INTER_CYCLE_MEMORY_MEASUREMENT_UNAVAILABLE'
+        )) { 2 } else { 3 }
+        $continueToNextCycle = $false
+    }
+    finally {
+        try {
+            if ($null -eq $LifecycleLock.Value) {
+                throw 'LIFECYCLE_LOCK_OWNERSHIP_REQUIRED'
+            }
+            Exit-ThriveLensLifecycleLock -Mutex $LifecycleLock.Value
+        }
+        catch {
+            $lockReleaseFailed = $true
+            $continueToNextCycle = $false
+            $originalExitCode = 3
+            if ($null -eq $originalCode) {
+                $originalCode = 'RUNTIME_TEST_INTERNAL_ERROR'
+            }
+        }
+        finally {
+            $LifecycleLock.Value = $null
+            $IdentityToken.Value = $null
+        }
+    }
+    return [pscustomobject]@{
+        Continue = $continueToNextCycle
+        OriginalCode = $originalCode
+        ExitCode = $originalExitCode
+        LockReleaseFailed = $lockReleaseFailed
+    }
+}
+
 $started = $false
 $failureExitCode = 2
 $credentialCleanupFatal = $false
@@ -110,6 +164,7 @@ $probeIdentityEverEstablished = $false
 $cleanupAuthorityVerified = $true
 $distroAbsenceVerified = $false
 $hostAbsenceVerified = $false
+$lockReleaseFailed = $false
 
 try {
     Import-Module (Join-Path $PSScriptRoot 'Runtime.psm1') -Force
@@ -369,6 +424,21 @@ try {
         Assert-ThriveLensHostPortAbsent
         $hostAbsenceVerified = $true
         $started = $false
+        if ($cycle -eq 1) {
+            if (-not $credentialAbsenceVerified) {
+                throw 'AUTH_FILE_CLEANUP_ABSENCE_UNVERIFIED'
+            }
+            $interCycleBoundary = Invoke-ThriveLensInterCycleBoundary `
+                -MinimumFreeMemoryBytes ([int64]$manifest.resource_policy.runtime_minimum_free_memory_bytes) `
+                -LifecycleLock ([ref]$probeLifecycleLock) `
+                -IdentityToken ([ref]$probeIdentityToken)
+            $lockReleaseFailed = $lockReleaseFailed -or [bool]$interCycleBoundary.LockReleaseFailed
+            if (-not [bool]$interCycleBoundary.Continue) {
+                $failureExitCode = [int]$interCycleBoundary.ExitCode
+                throw [string]$interCycleBoundary.OriginalCode
+            }
+            continue
+        }
         Exit-ThriveLensLifecycleLock -Mutex $probeLifecycleLock
         $probeLifecycleLock=$null;$probeIdentityToken=$null
     }
@@ -401,7 +471,7 @@ catch {
     $cleanupRequired = $started
     $cleanupIdentityChanged=$false
     $postgresStopFailed=$false;$distroTerminateFailed=$false
-    $distroAbsenceCheckFailed=$false;$hostAbsenceCheckFailed=$false;$lockReleaseFailed=$false
+    $distroAbsenceCheckFailed=$false;$hostAbsenceCheckFailed=$false
 
     # Once a cycle has captured an identity token, cleanup stays under that
     # same mutex/token authority. Never release it and mint fresh authority for

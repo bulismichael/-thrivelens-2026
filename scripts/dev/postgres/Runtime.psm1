@@ -197,17 +197,132 @@ function Get-ThriveLensPostgresPaths {
     return $paths
 }
 
+if ($null -eq ('ThriveLens.HostMemorySnapshot' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace ThriveLens
+{
+    public static class HostMemorySnapshot
+    {
+        [StructLayout(LayoutKind.Sequential, Pack = 8)]
+        private struct MEMORYSTATUSEX
+        {
+            public UInt32 dwLength;
+            public UInt32 dwMemoryLoad;
+            public UInt64 ullTotalPhys;
+            public UInt64 ullAvailPhys;
+            public UInt64 ullTotalPageFile;
+            public UInt64 ullAvailPageFile;
+            public UInt64 ullTotalVirtual;
+            public UInt64 ullAvailVirtual;
+            public UInt64 ullAvailExtendedVirtual;
+        }
+
+        [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX status);
+
+        public static Int64 ToSignedByteCount(UInt64 availablePhysicalBytes)
+        {
+            return checked((Int64)availablePhysicalBytes);
+        }
+
+        public static Int64 GetAvailablePhysicalBytes()
+        {
+            MEMORYSTATUSEX status = new MEMORYSTATUSEX();
+            int nativeSize = Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+            if (nativeSize != 64)
+            {
+                throw new InvalidOperationException("Unexpected MEMORYSTATUSEX ABI size.");
+            }
+            status.dwLength = checked((UInt32)nativeSize);
+            if (!GlobalMemoryStatusEx(ref status))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            return ToSignedByteCount(status.ullAvailPhys);
+        }
+    }
+}
+'@
+}
+
 function Get-ThriveLensFreeMemoryBytes {
     if (-not $IsWindows) {
         throw 'WINDOWS_HOST_REQUIRED'
     }
     try {
-        $os = Get-CimInstance Win32_OperatingSystem
-        return [int64]$os.FreePhysicalMemory * 1KB
+        $availableBytes = [ThriveLens.HostMemorySnapshot]::GetAvailablePhysicalBytes()
+        if ($availableBytes -lt 0) {
+            throw 'INVALID_MEMORY_SAMPLE'
+        }
+        return [int64]$availableBytes
     }
     catch {
         throw 'MEMORY_MEASUREMENT_UNAVAILABLE'
     }
+}
+
+function Wait-ThriveLensInterCycleMemorySettle {
+    param(
+        [Parameter(Mandatory)][int64]$MinimumFreeMemoryBytes
+    )
+
+    if ($MinimumFreeMemoryBytes -le 0) {
+        throw 'RESOURCE_INTER_CYCLE_MEMORY_MEASUREMENT_UNAVAILABLE'
+    }
+
+    $timeoutMilliseconds = 30000
+    $sampleIntervalMilliseconds = 1000
+    $requiredConsecutiveSamples = 3
+    $consecutiveSamples = 0
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        while ($stopwatch.ElapsedMilliseconds -le $timeoutMilliseconds) {
+            try {
+                $samples = @(Get-ThriveLensFreeMemoryBytes)
+                if ($samples.Count -ne 1 -or $null -eq $samples[0] -or $samples[0] -is [bool]) {
+                    throw 'INVALID_MEMORY_SAMPLE'
+                }
+                $sampleText = [Convert]::ToString($samples[0], [Globalization.CultureInfo]::InvariantCulture)
+                $freeMemoryBytes = [int64]0
+                if (-not [int64]::TryParse(
+                    $sampleText,
+                    [Globalization.NumberStyles]::Integer,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [ref]$freeMemoryBytes
+                ) -or $freeMemoryBytes -lt 0) {
+                    throw 'INVALID_MEMORY_SAMPLE'
+                }
+            }
+            catch {
+                throw 'RESOURCE_INTER_CYCLE_MEMORY_MEASUREMENT_UNAVAILABLE'
+            }
+
+            if ($freeMemoryBytes -ge $MinimumFreeMemoryBytes) {
+                $consecutiveSamples++
+                if ($consecutiveSamples -ge $requiredConsecutiveSamples) {
+                    return
+                }
+            }
+            else {
+                $consecutiveSamples = 0
+            }
+
+            $remainingMilliseconds = $timeoutMilliseconds - $stopwatch.ElapsedMilliseconds
+            if ($remainingMilliseconds -le 0) {
+                break
+            }
+            Start-Sleep -Milliseconds ([int][Math]::Min($sampleIntervalMilliseconds, $remainingMilliseconds))
+        }
+    }
+    finally {
+        $stopwatch.Stop()
+    }
+    throw 'RESOURCE_INTER_CYCLE_MEMORY_NOT_SETTLED'
 }
 
 function Get-ThriveLensResourcePhase {
@@ -811,6 +926,7 @@ Export-ModuleMember -Function @(
     'Assert-ThriveLensOwnedPath',
     'Get-ThriveLensPostgresPaths',
     'Get-ThriveLensFreeMemoryBytes',
+    'Wait-ThriveLensInterCycleMemorySettle',
     'Get-ThriveLensResourcePhase',
     'Assert-ThriveLensProjectedBudget',
     'Assert-ThriveLensFreeDiskBudget',
