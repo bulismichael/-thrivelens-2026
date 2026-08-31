@@ -6,7 +6,8 @@
 .venv/
 **/.venv/
 **/node_modules/
-**/.dart_tool/
+**/.expo/
+**/.metro/
 **/.gradle/
 **/.next/
 **/build/
@@ -30,6 +31,13 @@ logs/
 *.pem
 *.pfx
 *.key
+
+# ML artifacts
+ml/models/checkpoints/*.pt
+ml/models/exported/*.onnx
+ml/data/raw/
+ml/data/processed/
+ml/data/augmented/
 
 # IDE and operating-system state.
 .idea/

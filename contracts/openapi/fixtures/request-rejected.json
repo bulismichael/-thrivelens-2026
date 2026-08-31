@@ -1,7 +1,0 @@
-{
-  "error": {
-    "code": "REQUEST_REJECTED",
-    "message": "The request was rejected.",
-    "correlation_id": "fixture-rejected"
-  }
-}

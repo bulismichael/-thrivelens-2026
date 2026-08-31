@@ -1,7 +1,0 @@
-{
-  "error": {
-    "code": "INTERNAL_ERROR",
-    "message": "The request could not be completed.",
-    "correlation_id": "fixture-internal"
-  }
-}

@@ -1,9 +1,0 @@
-{
-  "status": "not_ready",
-  "database": "unknown",
-  "error": {
-    "code": "DATABASE_STATUS_UNKNOWN",
-    "message": "Database status is unknown.",
-    "correlation_id": "fixture-unknown"
-  }
-}
