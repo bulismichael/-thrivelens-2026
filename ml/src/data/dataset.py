@@ -51,11 +51,12 @@ def get_transforms(config, split="train"):
     std = config["augmentation"]["normalize_std"]
 
     if split == "train":
+        crop_size = tuple(config.get("augmentation", {}).get("random_crop", config["model"]["input_size"]))
         return transforms.Compose([
             transforms.Resize((256, 256)),
-            transforms.RandomCrop(config["data"]["input_size"]),
+            transforms.RandomCrop(crop_size),
             transforms.RandomHorizontalFlip(config["augmentation"]["random_flip"]),
-            transforms.ColorJitter(config["augmentation"]["color_jitter"]),
+            transforms.ColorJitter(brightness=config["augmentation"]["color_jitter"], contrast=config["augmentation"]["color_jitter"]),
             transforms.ToTensor(),
             transforms.Normalize(mean, std),
         ])

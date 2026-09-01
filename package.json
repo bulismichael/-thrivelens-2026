@@ -1,0 +1,33 @@
+{
+  "name": "thrivelens",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend",
+    "shared"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=backend\" \"npm run start --workspace=frontend\"",
+    "dev:backend": "npm run dev --workspace=backend",
+    "dev:frontend": "npm run start --workspace=frontend",
+    "build": "npm run build --workspace=thrivelens-backend && npm run typecheck --workspace=thrivelens-frontend && npm run typecheck --workspace=@thrivelens/shared",
+    "build:backend": "npm run build --workspace=thrivelens-backend",
+    "db:migrate": "npm run db:migrate --workspace=backend",
+    "db:seed": "npm run db:seed --workspace=backend",
+    "lint": "npm run lint --workspace=thrivelens-backend && npm run lint --workspace=thrivelens-frontend",
+    "lint:fix": "npm run lint:fix --workspace=thrivelens-backend && npm run lint --workspace=thrivelens-frontend -- --fix",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspace=thrivelens-backend && npm run typecheck --workspace=thrivelens-frontend && npm run typecheck --workspace=@thrivelens/shared",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "dependencies": {
+    "react-dom": "18.2.0",
+    "react-native-web": "~0.19.10"
+  }
+}

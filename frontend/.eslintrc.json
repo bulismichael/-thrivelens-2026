@@ -1,0 +1,11 @@
+{
+  "extends": "expo",
+  "env": {
+    "browser": true,
+    "node": true
+  },
+  "rules": {
+    "no-console": "off"
+  },
+  "ignorePatterns": ["dist/*", "node_modules/*", ".expo/*"]
+}

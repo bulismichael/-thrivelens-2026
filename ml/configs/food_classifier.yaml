@@ -1,0 +1,34 @@
+model:
+  name: food_classifier
+  backbone: mobilenet_v3_small
+  num_classes: 101
+  input_size: [224, 224]
+  dropout: 0.2
+
+training:
+  batch_size: 32
+  epochs: 50
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  scheduler: cosine
+  early_stopping_patience: 7
+
+data:
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  num_workers: 4
+  augment: true
+
+augmentation:
+  random_flip: 0.5
+  random_rotation: 15
+  random_crop: [224, 224]
+  color_jitter: 0.3
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+
+export:
+  onnx: true
+  tflite: false
+  quantize: true

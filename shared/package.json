@@ -1,0 +1,15 @@
+{
+  "name": "@thrivelens/shared",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "types": "index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo \"no lint for shared\"",
+    "test": "echo \"no tests for shared\" && exit 0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.3"
+  }
+}

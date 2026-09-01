@@ -1,0 +1,58 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: thrivelens
+          POSTGRES_PASSWORD: thrivelens_dev_password
+          POSTGRES_DB: thrivelens
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+      - run: npm run test
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USER: thrivelens
+          DB_PASSWORD: thrivelens_dev_password
+          DB_NAME: thrivelens
+          JWT_SECRET: ci-test-secret
+      - run: pip install -r ml/requirements.txt
+      - run: python -m py_compile ml/src/data/dataset.py ml/src/training/utils.py ml/src/export.py ml/train.py
+      - run: docker compose config
