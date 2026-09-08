@@ -1,0 +1,26 @@
+{
+  "bodyParts": [
+    { "id": "chest", "name": "Chest", "icon": "dumbbell" },
+    { "id": "shoulders", "name": "Shoulders", "icon": "dumbbell" },
+    { "id": "biceps", "name": "Biceps", "icon": "dumbbell" },
+    { "id": "triceps", "name": "Triceps", "icon": "dumbbell" },
+    { "id": "back", "name": "Back", "icon": "dumbbell" },
+    { "id": "quads", "name": "Quadriceps", "icon": "dumbbell" },
+    { "id": "hamstrings", "name": "Hamstrings", "icon": "dumbbell" },
+    { "id": "abs", "name": "Abdominals", "icon": "dumbbell" },
+    { "id": "glutes", "name": "Glutes", "icon": "dumbbell" }
+  ],
+  "exercises": [
+    {
+      "id": "barbell-bench-press",
+      "name": "Barbell Bench Press",
+      "bodyPart": "chest",
+      "type": "Strength",
+      "equipment": "Barbell",
+      "mechanics": "Compound",
+      "level": "Beginner",
+      "videoPath": "assets/videos/chest/barbell-bench-press.mp4",
+      "description": "The barbell bench press is a classic exercise for building chest mass and strength. It targets the pectoralis major, anterior deltoids, and triceps."
+    }
+  ]
+}
