@@ -5,6 +5,8 @@ import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { PropsWithChildren } from "react";
 import { applyAuthCallback } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
+import { clearAccountCache } from "@/data/profileRepository";
+import { flushOutbox } from "@/data/sync";
 
 type AuthContextValue = {
   session: Session | null;
@@ -36,6 +38,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
       if (mounted) {
         setSession(nextSession);
         setIsLoading(false);
+        if (nextSession?.user.id) {
+          void flushOutbox(nextSession.user.id);
+        }
       }
     });
 
@@ -76,8 +81,10 @@ export function AuthProvider({ children }: PropsWithChildren) {
       session,
       isLoading,
       signOut: async () => {
+        const userId = session?.user.id;
         const { error } = await supabase.auth.signOut();
         if (error) throw error;
+        if (userId) await clearAccountCache(userId);
       },
     }),
     [isLoading, session],

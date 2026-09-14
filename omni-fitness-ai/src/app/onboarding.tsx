@@ -3,6 +3,8 @@ import { View, ScrollView, Pressable, Dimensions } from "react-native";
 import { router } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Text, Button, TextInput, Card } from "@/components/ui";
+import { Alert } from "react-native";
+import { updateCurrentProfile } from "@/data/profileRepository";
 import {
   Calendar,
   Clock,
@@ -168,9 +170,12 @@ export default function OnboardingScreen() {
     sessionDuration: "45",
     location: "gym",
     workoutType: "",
+    calorieTarget: "2200",
+    proteinTarget: "165",
+    dietaryPreference: "None",
   });
 
-  const handleNext = () => {
+  const handleNext = async () => {
     if (currentStep === 3) {
       const days = parseInt(formData.daysPerWeek);
       const duration = parseInt(formData.sessionDuration);
@@ -180,8 +185,23 @@ export default function OnboardingScreen() {
     if (currentStep < steps.length - 1) {
       setCurrentStep((prev) => prev + 1);
     } else {
-      // Complete onboarding
-      router.replace("/(tabs)");
+      try {
+        await updateCurrentProfile({
+          display_name: formData.name.trim() || null,
+          age: Number(formData.age) || null,
+          height: Number(formData.height) || null,
+          weight: Number(formData.weight) || null,
+          experience: formData.fitnessLevel || null,
+          goal: formData.goal || null,
+          onboarding_completed: true,
+        });
+        router.replace("/(tabs)");
+      } catch (error) {
+        Alert.alert(
+          "Unable to save setup",
+          error instanceof Error ? error.message : "Check your connection and try again.",
+        );
+      }
     }
   };
 
@@ -471,11 +491,15 @@ export default function OnboardingScreen() {
             <TextInput
               label="Daily calorie target"
               placeholder="2200"
+              value={formData.calorieTarget}
+              onChangeText={(text) => setFormData({ ...formData, calorieTarget: text })}
               keyboardType="numeric"
             />
             <TextInput
               label="Protein target (g)"
               placeholder="165"
+              value={formData.proteinTarget}
+              onChangeText={(text) => setFormData({ ...formData, proteinTarget: text })}
               keyboardType="numeric"
             />
             <View>
@@ -488,6 +512,8 @@ export default function OnboardingScreen() {
                     <Pressable
                       key={pref}
                       className="px-4 py-2 rounded-full bg-surface border border-border"
+                      onPress={() => setFormData({ ...formData, dietaryPreference: pref })}
+                      style={formData.dietaryPreference === pref ? { borderColor: "#208AEF" } : undefined}
                     >
                       <Text variant="bodySmall" className="text-text-secondary">
                         {pref}
