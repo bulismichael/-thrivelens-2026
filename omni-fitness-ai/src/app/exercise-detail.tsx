@@ -41,7 +41,7 @@ export default function ExerciseDetailScreen() {
   const color = bodyPartColors[params.bodyPart || "chest"] || "#208AEF";
   
   const player = useVideoPlayer(
-    params.videoPath ? { uri: params.videoPath } : undefined,
+    params.videoPath ? { uri: params.videoPath } : null,
     (player) => {
       player.loop = true;
     }
