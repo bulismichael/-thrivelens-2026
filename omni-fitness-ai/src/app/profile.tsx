@@ -5,6 +5,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { ChevronLeft, Settings, LogOut, Bell, Moon, Shield, HelpCircle, Camera } from "lucide-react-native";
 import * as ImagePicker from "expo-image-picker";
 import { Text, Card, Avatar } from "@/components/ui";
+import { useAuth } from "@/providers/AuthProvider";
 
 const menuItems = [
   { icon: Settings, label: "Settings", color: "#A0A0B0" },
@@ -16,6 +17,7 @@ const menuItems = [
 ];
 
 export default function ProfileScreen() {
+  const { signOut } = useAuth();
   const [imageUri, setImageUri] = useState<string | undefined>(undefined);
 
   const pickImage = async () => {
@@ -107,7 +109,14 @@ export default function ProfileScreen() {
             <Pressable
               key={index}
               className="flex-row items-center py-4 border-b border-border-light"
-              onPress={() => {}}
+              onPress={async () => {
+                if (item.label !== "Sign Out") return;
+                try {
+                  await signOut();
+                } catch (error) {
+                  Alert.alert("Unable to sign out", error instanceof Error ? error.message : "Try again.");
+                }
+              }}
             >
               <View className="w-10 h-10 rounded-full bg-surface-elevated items-center justify-center mr-4">
                 <item.icon size={18} color={item.color} />

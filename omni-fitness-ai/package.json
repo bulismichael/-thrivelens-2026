@@ -7,6 +7,7 @@
     "@expo-google-fonts/jetbrains-mono": "^0.4.1",
     "@expo-google-fonts/syne": "^0.4.2",
     "@expo/ui": "~57.0.15",
+    "@react-native-async-storage/async-storage": "^3.1.1",
     "@react-navigation/native": "^7.3.18",
     "@supabase/supabase-js": "^2.112.4",
     "babel-preset-expo": "^57.0.10",

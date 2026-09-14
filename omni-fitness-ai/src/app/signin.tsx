@@ -2,6 +2,8 @@ import { View, Text, TouchableOpacity, TextInput, ScrollView, KeyboardAvoidingVi
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
+import { supabase } from '@/lib/supabase';
+import { signInWithProvider } from '@/lib/auth';
 import { ArrowLeft, Mail, Lock, Eye, EyeOff } from 'lucide-react-native';
 import Svg, { Path } from 'react-native-svg';
 
@@ -32,16 +34,34 @@ export default function SignIn() {
   const [focusedField, setFocusedField] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  const handleSignIn = () => {
+  const handleSignIn = async () => {
     if (!email || !password) {
       Alert.alert('Missing Fields', 'Please fill in all fields.');
       return;
     }
     setIsLoading(true);
-    setTimeout(() => {
+    const { error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
+    setIsLoading(false);
+    if (error) {
+      Alert.alert('Unable to sign in', error.message);
+      return;
+    }
+    router.replace('/(tabs)');
+  };
+
+  const handleProviderSignIn = async (provider: 'google' | 'apple') => {
+    setIsLoading(true);
+    try {
+      await signInWithProvider(provider);
+      router.replace('/(tabs)');
+    } catch (error) {
+      Alert.alert('Unable to sign in', error instanceof Error ? error.message : 'Try again.');
+    } finally {
       setIsLoading(false);
-      router.replace('/');
-    }, 1500);
+    }
   };
 
   return (
@@ -95,7 +115,7 @@ export default function SignIn() {
 
           {/* Forgot Password */}
           <View style={styles.forgotRow}>
-            <TouchableOpacity>
+            <TouchableOpacity onPress={() => router.push('/forgot-password')}>
               <Text style={styles.forgotText}>Forgot Password?</Text>
             </TouchableOpacity>
           </View>
@@ -114,13 +134,13 @@ export default function SignIn() {
 
           {/* Social Login */}
           <View style={styles.socialRow}>
-            <SocialButton icon={<GoogleIcon />} label="Google" onPress={() => {}} />
-            <SocialButton icon={<AppleIcon />} label="Apple" onPress={() => {}} />
+            <SocialButton icon={<GoogleIcon />} label="Google" onPress={() => handleProviderSignIn('google')} />
+            <SocialButton icon={<AppleIcon />} label="Apple" onPress={() => handleProviderSignIn('apple')} />
           </View>
 
           {/* Sign Up Link */}
           <View style={styles.linkRow}>
-            <Text style={styles.linkText}>Don't have an account? </Text>
+            <Text style={styles.linkText}>Don&apos;t have an account? </Text>
             <TouchableOpacity onPress={() => router.push('/signup')}>
               <Text style={styles.linkAction}>Sign Up</Text>
             </TouchableOpacity>

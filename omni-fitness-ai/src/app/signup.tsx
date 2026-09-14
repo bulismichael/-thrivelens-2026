@@ -2,6 +2,8 @@ import { View, Text, TouchableOpacity, TextInput, ScrollView, KeyboardAvoidingVi
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
+import { supabase } from '@/lib/supabase';
+import { signInWithProvider } from '@/lib/auth';
 import { ArrowLeft, User, Mail, Lock, Eye, EyeOff } from 'lucide-react-native';
 import Svg, { Path } from 'react-native-svg';
 
@@ -44,7 +46,7 @@ export default function SignUp() {
 
   const strength = getPasswordStrength(password);
 
-  const handleSignUp = () => {
+  const handleSignUp = async () => {
     if (!fullName || !email || !password || !confirmPassword) {
       Alert.alert('Missing Fields', 'Please fill in all fields.');
       return;
@@ -54,10 +56,34 @@ export default function SignUp() {
       return;
     }
     setIsLoading(true);
-    setTimeout(() => {
+    const { data, error } = await supabase.auth.signUp({
+      email: email.trim(),
+      password,
+      options: { data: { full_name: fullName.trim() } },
+    });
+    setIsLoading(false);
+    if (error) {
+      Alert.alert('Unable to create account', error.message);
+      return;
+    }
+    if (!data.session) {
+      Alert.alert('Check your email', 'Confirm your email address, then sign in to continue.');
+      router.replace('/signin');
+      return;
+    }
+    router.replace('/onboarding');
+  };
+
+  const handleProviderSignUp = async (provider: 'google' | 'apple') => {
+    setIsLoading(true);
+    try {
+      await signInWithProvider(provider);
+      router.replace('/onboarding');
+    } catch (error) {
+      Alert.alert('Unable to create account', error instanceof Error ? error.message : 'Try again.');
+    } finally {
       setIsLoading(false);
-      router.push('/onboarding');
-    }, 1500);
+    }
   };
 
   return (
@@ -168,8 +194,8 @@ export default function SignUp() {
 
           {/* Social Login */}
           <View style={styles.socialRow}>
-            <SocialButton icon={<GoogleIcon />} label="Google" onPress={() => {}} />
-            <SocialButton icon={<AppleIcon />} label="Apple" onPress={() => {}} />
+            <SocialButton icon={<GoogleIcon />} label="Google" onPress={() => handleProviderSignUp('google')} />
+            <SocialButton icon={<AppleIcon />} label="Apple" onPress={() => handleProviderSignUp('apple')} />
           </View>
 
           {/* Sign In Link */}
