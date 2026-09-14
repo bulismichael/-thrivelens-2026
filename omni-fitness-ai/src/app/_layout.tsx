@@ -29,11 +29,12 @@ function AuthGate() {
       rootSegment === "welcome" ||
       rootSegment === "signin" ||
       rootSegment === "signup" ||
+      rootSegment === "forgot-password" ||
       rootSegment === "reset-password";
 
     if (!session && !isPublicRoute) {
       router.replace("/welcome");
-    } else if (session && (rootSegment === "welcome" || rootSegment === "signin" || rootSegment === "signup")) {
+    } else if (session && (rootSegment === "welcome" || rootSegment === "signin")) {
       router.replace("/(tabs)");
     }
   }, [isLoading, router, segments, session]);
