@@ -21,6 +21,13 @@ export const profiles = sqliteTable("profiles", {
   goal: text("goal"),
   activityLevel: text("activity_level"),
   experience: text("experience"),
+  calorieTarget: integer("calorie_target"),
+  proteinTarget: real("protein_target"),
+  dietaryPreference: text("dietary_preference"),
+  trainingDaysPerWeek: integer("training_days_per_week"),
+  sessionDurationMinutes: integer("session_duration_minutes"),
+  workoutLocation: text("workout_location"),
+  workoutType: text("workout_type"),
   onboardingCompleted: integer("onboarding_completed", { mode: "boolean" })
     .notNull()
     .default(false),
@@ -42,9 +49,7 @@ export const exercises = sqliteTable("exercises", {
 
 export const workoutPlans = sqliteTable("workout_plans", {
   id: text("id").primaryKey(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => profiles.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
   description: text("description"),
   goal: text("goal"),
@@ -56,9 +61,7 @@ export const workoutPlans = sqliteTable("workout_plans", {
 
 export const workoutDays = sqliteTable("workout_days", {
   id: text("id").primaryKey(),
-  planId: text("plan_id")
-    .notNull()
-    .references(() => workoutPlans.id, { onDelete: "cascade" }),
+  planId: text("plan_id").notNull().references(() => workoutPlans.id, { onDelete: "cascade" }),
   dayNumber: integer("day_number").notNull(),
   name: text("name").notNull(),
   focus: text("focus"),
@@ -66,12 +69,8 @@ export const workoutDays = sqliteTable("workout_days", {
 
 export const workoutExercises = sqliteTable("workout_exercises", {
   id: text("id").primaryKey(),
-  dayId: text("day_id")
-    .notNull()
-    .references(() => workoutDays.id, { onDelete: "cascade" }),
-  exerciseId: text("exercise_id")
-    .notNull()
-    .references(() => exercises.id),
+  dayId: text("day_id").notNull().references(() => workoutDays.id, { onDelete: "cascade" }),
+  exerciseId: text("exercise_id").notNull().references(() => exercises.id),
   sets: integer("sets").notNull().default(3),
   reps: text("reps").notNull().default("8-12"),
   restSeconds: integer("rest_seconds").notNull().default(90),
@@ -81,15 +80,9 @@ export const workoutExercises = sqliteTable("workout_exercises", {
 
 export const workoutSessions = sqliteTable("workout_sessions", {
   id: text("id").primaryKey(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => profiles.id, { onDelete: "cascade" }),
-  planId: text("plan_id").references(() => workoutPlans.id, {
-    onDelete: "set null",
-  }),
-  dayId: text("day_id").references(() => workoutDays.id, {
-    onDelete: "set null",
-  }),
+  userId: text("user_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
+  planId: text("plan_id").references(() => workoutPlans.id, { onDelete: "set null" }),
+  dayId: text("day_id").references(() => workoutDays.id, { onDelete: "set null" }),
   startedAt: text("started_at").notNull(),
   completedAt: text("completed_at"),
   totalVolume: real("total_volume"),
@@ -98,15 +91,9 @@ export const workoutSessions = sqliteTable("workout_sessions", {
 
 export const workoutLogs = sqliteTable("workout_logs", {
   id: text("id").primaryKey(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => profiles.id, { onDelete: "cascade" }),
-  exerciseId: text("exercise_id")
-    .notNull()
-    .references(() => exercises.id),
-  sessionId: text("session_id").references(() => workoutSessions.id, {
-    onDelete: "cascade",
-  }),
+  userId: text("user_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
+  exerciseId: text("exercise_id").notNull().references(() => exercises.id),
+  sessionId: text("session_id").references(() => workoutSessions.id, { onDelete: "cascade" }),
   loggedAt: text("logged_at").notNull(),
   setsCompleted: integer("sets_completed").notNull().default(0),
   reps: text("reps"),
@@ -118,9 +105,7 @@ export const workoutLogs = sqliteTable("workout_logs", {
 
 export const foodLogs = sqliteTable("food_logs", {
   id: text("id").primaryKey(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => profiles.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
   loggedAt: text("logged_at").notNull(),
   mealType: text("meal_type").notNull(),
   foodName: text("food_name").notNull(),
@@ -137,9 +122,7 @@ export const foodLogs = sqliteTable("food_logs", {
 
 export const progressLogs = sqliteTable("progress_logs", {
   id: text("id").primaryKey(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => profiles.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
   loggedAt: text("logged_at").notNull(),
   weight: real("weight"),
   bodyFat: real("body_fat"),

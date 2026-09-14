@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { View, Pressable, ScrollView } from "react-native";
 import { router } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -21,6 +21,8 @@ import {
   WorkoutCard,
   PressableScale,
 } from "@/components/ui";
+import { getCurrentProfile, Profile } from "@/data/profileRepository";
+import { getTodayFoodSummary } from "@/data/foodRepository";
 
 const EASE_OUT = Easing.bezier(0.23, 1, 0.32, 1);
 
@@ -34,7 +36,14 @@ function getGreeting(): string {
 }
 
 export default function HomeScreen() {
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [foodSummary, setFoodSummary] = useState({ calories: 0, protein: 0, carbs: 0, fat: 0 });
   const scrollY = useSharedValue(0);
+
+  useEffect(() => {
+    getCurrentProfile().then(setProfile).catch(() => undefined);
+    getTodayFoodSummary().then(setFoodSummary).catch(() => undefined);
+  }, []);
 
   const onScroll = useAnimatedScrollHandler((e) => {
     scrollY.set(e.contentOffset.y);
@@ -48,7 +57,7 @@ export default function HomeScreen() {
   }));
 
   const user = {
-    name: "Alex",
+    name: profile?.display_name?.split(" ")[0] ?? "there",
     greeting: getGreeting(),
   };
 
@@ -61,10 +70,10 @@ export default function HomeScreen() {
   };
 
   const nutrition = {
-    calories: { consumed: 1450, target: 2200 },
-    protein: { consumed: 95, target: 165 },
-    carbs: { consumed: 180, target: 275 },
-    fat: { consumed: 45, target: 73 },
+    calories: { consumed: Math.round(foodSummary.calories), target: 2200 },
+    protein: { consumed: Math.round(foodSummary.protein), target: 165 },
+    carbs: { consumed: Math.round(foodSummary.carbs), target: 275 },
+    fat: { consumed: Math.round(foodSummary.fat), target: 73 },
   };
 
   const enteringWorkout = useMemo(() => FadeInDown.duration(500).delay(100).easing(EASE_OUT), []);
@@ -98,7 +107,7 @@ export default function HomeScreen() {
               <Text variant="body">🔔</Text>
             </PressableScale>
             <PressableScale onPress={() => router.push("/profile")}>
-              <Avatar initials="A" size="md" />
+              <Avatar initials={(profile?.display_name?.[0] ?? "U").toUpperCase()} uri={profile?.avatar_url ?? undefined} size="md" />
             </PressableScale>
           </View>
         </Animated.View>

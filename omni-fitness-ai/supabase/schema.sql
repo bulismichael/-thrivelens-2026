@@ -1,5 +1,4 @@
--- Canonical schema entry point. Keep the migration as the deployable source of truth.
-\ir migrations/20260914000000_initial_schema.sql-- The canonical A1 schema is versioned in:
+-- The canonical A1 schema is versioned in:
 --   migrations/20260914000000_initial_schema.sql
 --
 -- Apply it with the Supabase CLI:

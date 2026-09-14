@@ -2,8 +2,8 @@ import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { useEffect } from "react";
-import { AuthProvider, useAuth } from "../providers/AuthProvider";
-import "../global.css";
+import { AuthProvider, useAuth } from "@/providers/AuthProvider";
+import "./global.css";
 
 export default function RootLayout() {
   return (
@@ -24,15 +24,17 @@ function AuthGate() {
   useEffect(() => {
     if (isLoading) return;
 
-    const publicRoutes = ["welcome", "signin", "signup", "forgot-password", "reset-password"];
-    const authEntryRoutes = ["welcome", "signin", "signup"];
-
-    const isPublicRoute = segments.some((segment) => publicRoutes.includes(segment));
-    const isAuthEntryRoute = segments.some((segment) => authEntryRoutes.includes(segment));
+    const rootSegment = segments[0];
+    const isPublicRoute =
+      rootSegment === "welcome" ||
+      rootSegment === "signin" ||
+      rootSegment === "signup" ||
+      rootSegment === "forgot-password" ||
+      rootSegment === "reset-password";
 
     if (!session && !isPublicRoute) {
       router.replace("/welcome");
-    } else if (session && isAuthEntryRoute) {
+    } else if (session && (rootSegment === "welcome" || rootSegment === "signin")) {
       router.replace("/(tabs)");
     }
   }, [isLoading, router, segments, session]);
