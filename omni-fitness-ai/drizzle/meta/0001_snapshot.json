@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "514cb881-f6bf-42bf-b50a-320809b2bb51",
-  "prevId": "00000000-0000-0000-0000-000000000000",
+  "id": "dc970fb9-4e15-4b30-9663-d58d1a5f6d9f",
+  "prevId": "514cb881-f6bf-42bf-b50a-320809b2bb51",
   "tables": {
     "exercises": {
       "name": "exercises",
@@ -202,7 +202,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -459,7 +459,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -717,7 +717,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "workout_logs_exercise_id_exercises_id_fk": {
@@ -840,7 +840,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -920,7 +920,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "workout_sessions_plan_id_workout_plans_id_fk": {
