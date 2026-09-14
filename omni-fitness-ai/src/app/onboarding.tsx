@@ -194,6 +194,13 @@ export default function OnboardingScreen() {
           experience: formData.fitnessLevel || null,
           goal: formData.goal || null,
           onboarding_completed: true,
+          calorie_target: Number(formData.calorieTarget) || null,
+          protein_target: Number(formData.proteinTarget) || null,
+          dietary_preference: formData.dietaryPreference,
+          training_days_per_week: Number(formData.daysPerWeek) || null,
+          session_duration_minutes: Number(formData.sessionDuration) || null,
+          workout_location: formData.location,
+          workout_type: formData.workoutType || null,
         });
         router.replace("/(tabs)");
       } catch (error) {

@@ -69,6 +69,17 @@ export function markOperationFailed(operationId: string, attempts: number, error
   );
 }
 
+export function markOperationConflict(operationId: string, error: string) {
+  database.runSync(
+    `UPDATE outbox
+     SET status = 'conflict', last_error = ?, updated_at = ?
+     WHERE operation_id = ?`,
+    error,
+    new Date().toISOString(),
+    operationId,
+  );
+}
+
 export function clearUserOutbox(userId: string) {
   database.runSync("DELETE FROM outbox WHERE user_id = ?", userId);
 }

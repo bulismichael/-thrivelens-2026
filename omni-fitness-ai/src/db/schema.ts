@@ -21,6 +21,13 @@ export const profiles = sqliteTable("profiles", {
   goal: text("goal"),
   activityLevel: text("activity_level"),
   experience: text("experience"),
+  calorieTarget: integer("calorie_target"),
+  proteinTarget: real("protein_target"),
+  dietaryPreference: text("dietary_preference"),
+  trainingDaysPerWeek: integer("training_days_per_week"),
+  sessionDurationMinutes: integer("session_duration_minutes"),
+  workoutLocation: text("workout_location"),
+  workoutType: text("workout_type"),
   onboardingCompleted: integer("onboarding_completed", { mode: "boolean" })
     .notNull()
     .default(false),

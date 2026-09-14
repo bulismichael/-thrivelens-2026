@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from "react";
-import { View, ScrollView, Pressable, Alert } from "react-native";
+import { View, ScrollView, Pressable, Alert, Share } from "react-native";
 import { router } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ChevronLeft, Settings, LogOut, Bell, Moon, Shield, HelpCircle, Camera } from "lucide-react-native";
 import * as ImagePicker from "expo-image-picker";
 import { Text, Card, Avatar } from "@/components/ui";
 import { useAuth } from "@/providers/AuthProvider";
-import { getCurrentProfile, Profile, updateCurrentProfile } from "@/data/profileRepository";
+import { getCurrentProfile, Profile, updateCurrentProfile, exportAccountData, deleteCurrentAccount } from "@/data/profileRepository";
 
 const menuItems = [
   { icon: Settings, label: "Settings", color: "#A0A0B0" },
@@ -56,6 +56,34 @@ export default function ProfileScreen() {
         Alert.alert("Unable to save photo", error instanceof Error ? error.message : "Try again.");
       }
     }
+  };
+
+  const handleExport = async () => {
+    if (!profile) return;
+    try {
+      const exportData = await exportAccountData(profile.id);
+      await Share.share({
+        title: "ThriveLens account export",
+        message: JSON.stringify(exportData, null, 2),
+      });
+    } catch (error) {
+      Alert.alert("Unable to export data", error instanceof Error ? error.message : "Try again.");
+    }
+  };
+
+  const handleDelete = () => {
+    Alert.alert("Delete account", "This permanently deletes your profile and all account data.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete", style: "destructive", onPress: async () => {
+          try {
+            await deleteCurrentAccount();
+          } catch (error) {
+            Alert.alert("Unable to delete account", error instanceof Error ? error.message : "Try again.");
+          }
+        },
+      },
+    ]);
   };
 
   return (
@@ -129,6 +157,8 @@ export default function ProfileScreen() {
               key={index}
               className="flex-row items-center py-4 border-b border-border-light"
               onPress={async () => {
+                if (item.label === "Settings") return handleExport();
+                if (item.label === "Privacy & Security") return handleDelete();
                 if (item.label !== "Sign Out") return;
                 try {
                   await signOut();
